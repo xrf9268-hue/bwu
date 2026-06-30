@@ -10,6 +10,10 @@ assignees: ""
 
 <!-- Example: M2: Auth and sync read path -->
 
+## Dependencies
+
+<!-- Use explicit lines like: Blocked by #1 -->
+
 ## Goal
 
 ## Official references

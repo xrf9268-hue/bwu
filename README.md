@@ -1,6 +1,6 @@
 # bwu
 
-Private Rust command-line client for Bitwarden and Vaultwarden, with a
+Public-source Rust command-line client for Bitwarden and Vaultwarden, with a
 security-first path toward passkey export and headless WebAuthn signing.
 
 This repository is intentionally starting with governance, architecture, and
@@ -12,6 +12,12 @@ security model instead of growing organically around convenience.
 
 Planning baseline only. Do not treat this repository as a usable password
 manager until the milestone issues are implemented and verified.
+
+## License
+
+No open-source license has been granted yet. The repository is public for
+design transparency and issue tracking, but the code remains all rights
+reserved until a license is added intentionally.
 
 ## Product intent
 

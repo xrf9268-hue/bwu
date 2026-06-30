@@ -14,6 +14,14 @@ before implementing it.
   challenge flow for command-line clients when bot protection is triggered.
 - [Bitwarden Password Manager APIs](https://bitwarden.com/help/bitwarden-apis/) -
   official API entry point and scope boundaries.
+- [Bitwarden clients repository](https://github.com/bitwarden/clients) -
+  official client implementation source for source-of-truth investigation only;
+  do not copy source into this repository.
+- [Bitwarden server repository](https://github.com/bitwarden/server) -
+  official server implementation source for source-of-truth investigation only;
+  do not copy source into this repository.
+- [Bitwarden authentication architecture](https://contributing.bitwarden.com/architecture/deep-dives/authentication/) -
+  official contributing documentation for authentication architecture.
 - [Bitwarden Security Whitepaper](https://bitwarden.com/help/bitwarden-security-white-paper/) -
   zero-knowledge model, local encryption, account keys, organization keys, and
   vault item encryption.
@@ -44,6 +52,12 @@ before implementing it.
   authentication hardening and logging guidance.
 - [OWASP Application Security Verification Standard](https://owasp.org/www-project-application-security-verification-standard/) -
   verification checklist vocabulary for security-sensitive features.
+- [GitHub Private Vulnerability Reporting](https://docs.github.com/en/code-security/security-advisories/working-with-repository-security-advisories/configuring-private-vulnerability-reporting-for-a-repository) -
+  private reporting workflow for public repositories.
+- [GitHub Secret Scanning](https://docs.github.com/en/code-security/secret-scanning/about-secret-scanning) -
+  public-repository secret detection and push protection.
+- [Dependabot Security Updates](https://docs.github.com/en/code-security/dependabot/dependabot-security-updates/about-dependabot-security-updates) -
+  dependency security update workflow.
 - [Cargo Book: Continuous Integration](https://doc.rust-lang.org/cargo/guide/continuous-integration.html) -
   Rust CI baseline.
 - [Cargo Book: Profiles](https://doc.rust-lang.org/cargo/reference/profiles.html) -
@@ -58,5 +72,8 @@ before implementing it.
 - Prefer official Bitwarden, W3C, IETF/RFC, OWASP, Rust, or RustSec sources.
 - Blog posts, copied source, and community examples can inform investigation
   but cannot be the sole basis for an implementation decision.
+- Official Bitwarden repositories can be used to understand protocol behavior
+  and define tests, but implementation must remain clean-room and must not copy
+  code.
 - Any issue touching cryptography, authentication, local secrets, passkeys, or
   agent behavior must cite the specific references it relies on.
