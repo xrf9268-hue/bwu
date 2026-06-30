@@ -1,6 +1,6 @@
 # Security Policy
 
-This is a private repository for a security-sensitive command-line client.
+This is a public repository for a security-sensitive command-line client.
 
 ## Supported versions
 
@@ -9,10 +9,13 @@ branch only.
 
 ## Reporting
 
-Open a private GitHub issue in this repository for design or implementation
-security concerns. Do not include real vault exports, master passwords, access
-tokens, refresh tokens, passkey private keys, or production account data in
-issues, commits, logs, or screenshots.
+Use GitHub private vulnerability reporting for sensitive security reports.
+Open a public GitHub issue only for non-sensitive design or implementation
+security concerns.
+
+Do not include real vault exports, master passwords, access tokens, refresh
+tokens, passkey private keys, or production account data in issues, commits,
+logs, or screenshots.
 
 ## Secret handling rules
 

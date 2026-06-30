@@ -44,6 +44,8 @@ before implementing it.
   authentication hardening and logging guidance.
 - [OWASP Application Security Verification Standard](https://owasp.org/www-project-application-security-verification-standard/) -
   verification checklist vocabulary for security-sensitive features.
+- [GitHub Private Vulnerability Reporting](https://docs.github.com/en/code-security/security-advisories/working-with-repository-security-advisories/configuring-private-vulnerability-reporting-for-a-repository) -
+  private reporting workflow for public repositories.
 - [Cargo Book: Continuous Integration](https://doc.rust-lang.org/cargo/guide/continuous-integration.html) -
   Rust CI baseline.
 - [Cargo Book: Profiles](https://doc.rust-lang.org/cargo/reference/profiles.html) -

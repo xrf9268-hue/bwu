@@ -7,8 +7,9 @@ Accepted.
 ## Context
 
 The project is inspired by existing Bitwarden-compatible command-line clients,
-but it is a private new implementation. Copying code from existing clients would
-inherit their structure, compatibility assumptions, and maintenance history.
+but it is a new clean-room implementation. Copying code from existing clients
+would inherit their structure, compatibility assumptions, and maintenance
+history.
 
 ## Decision
 

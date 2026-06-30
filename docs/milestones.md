@@ -86,11 +86,12 @@ Deliverables:
 
 ## M7: Packaging and release artifacts
 
-Goal: produce private, reproducible build artifacts without public release.
+Goal: produce reproducible macOS and Linux build artifacts with explicit release
+gating.
 
 Deliverables:
 
 - GitHub Actions build artifacts for macOS and Linux.
 - Checksums and build provenance notes.
-- Install instructions for private use.
+- Install instructions for maintainer-approved use.
 - Release checklist and rollback notes.
