@@ -46,3 +46,18 @@ Each implementation PR must include:
   passkeys, local storage, or agent behavior.
 - Test evidence.
 - A statement that no live secrets or real vault data were added.
+
+## Repository protection
+
+Desired protection for `main`:
+
+- Require pull requests for implementation work.
+- Require at least one review.
+- Require the Governance workflow before merge.
+- Block force pushes and branch deletion.
+
+As of 2026-06-30, GitHub rejects both repository rulesets and classic branch
+protection for this private personal repository unless the account upgrades to
+GitHub Pro or the repository is made public. Until that changes, treat direct
+pushes to `main` as reserved for governance bootstrap only; all implementation
+work should use issues, branches, pull requests, and local verification.
