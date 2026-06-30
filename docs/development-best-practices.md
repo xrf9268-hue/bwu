@@ -60,14 +60,50 @@ Each implementation PR must include:
 - GitHub secret scanning, push protection, Dependabot security updates, and
   private vulnerability reporting must stay enabled where GitHub supports them.
 
+Current repository security-control evidence, verified with owner/admin
+permission on 2026-06-30:
+
+```json
+{
+  "dependabot_security_updates": { "status": "enabled" },
+  "secret_scanning": { "status": "enabled" },
+  "secret_scanning_non_provider_patterns": { "status": "disabled" },
+  "secret_scanning_push_protection": { "status": "enabled" },
+  "secret_scanning_validity_checks": { "status": "disabled" }
+}
+```
+
+`gh api repos/xrf9268-hue/bwu/private-vulnerability-reporting --method GET`
+returned `{"enabled":true}`.
+
+The two disabled advanced secret scanning controls were also submitted through
+the repository update API:
+
+```text
+gh api repos/xrf9268-hue/bwu --method PATCH \
+  -F 'security_and_analysis[secret_scanning_non_provider_patterns][status]=enabled' \
+  -F 'security_and_analysis[secret_scanning_validity_checks][status]=enabled' \
+  --jq .security_and_analysis
+```
+
+GitHub accepted the request but returned both fields as `disabled`. Treat
+`secret_scanning_non_provider_patterns` and
+`secret_scanning_validity_checks` as unavailable for this user-owned public
+repository unless a future account, plan, or repository setting makes the API
+return `enabled`.
+
 ## Repository protection
 
-Desired protection for `main`:
+Active protection for `main`, verified through repository ruleset
+`Protect main with governance checks` on 2026-06-30:
 
-- Require pull requests for implementation work.
-- Require at least one review.
-- Require the Governance workflow before merge.
-- Block force pushes and branch deletion.
+- Applies to the default branch only.
+- Enforcement is active.
+- Blocks branch deletion and non-fast-forward updates.
+- Requires pull requests before merge.
+- Requires one approving review and dismisses stale reviews on new pushes.
+- Requires all review threads to be resolved.
+- Requires the `Docs baseline` status check with strict up-to-date policy.
+- Has no bypass actors, and the current admin user cannot bypass the ruleset.
 
-Now that the repository is public, enforce these protections through GitHub
-rulesets or classic branch protection before implementation work starts.
+The required `Docs baseline` check is provided by the Governance workflow.
