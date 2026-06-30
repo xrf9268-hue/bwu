@@ -1,0 +1,13 @@
+target/
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.db
+*.jsonl
+.DS_Store

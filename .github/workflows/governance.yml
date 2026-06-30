@@ -1,0 +1,47 @@
+name: Governance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs-baseline:
+    name: Docs baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required governance files
+        run: |
+          set -euo pipefail
+          required=(
+            README.md
+            SECURITY.md
+            docs/architecture.md
+            docs/security-model.md
+            docs/development-best-practices.md
+            docs/milestones.md
+            docs/references.md
+            docs/adr/README.md
+          )
+          for file in "${required[@]}"; do
+            test -s "$file"
+          done
+      - name: Verify official reference links are present
+        run: |
+          set -euo pipefail
+          grep -q "https://bitwarden.com/help/cli/" docs/references.md
+          grep -q "https://www.w3.org/TR/webauthn-3/" docs/references.md
+          grep -q "https://www.rfc-editor.org/rfc/rfc6238" docs/references.md
+          grep -q "https://cheatsheetseries.owasp.org/" docs/references.md
+          grep -q "https://rustsec.org/" docs/references.md
+      - name: Reject unresolved placeholders
+        run: |
+          set -euo pipefail
+          if grep -RInE '\b(TO[D]O|TB[D]|FIXM[E])\b' README.md SECURITY.md docs .github; then
+            echo "Unresolved placeholder found" >&2
+            exit 1
+          fi
