@@ -36,6 +36,9 @@
   examples before implementation is considered complete.
 - ADRs are required for auth flow, crypto design, local storage, agent IPC,
   passkey signing, and release/distribution.
+- Issues for implementation milestones must list their prerequisite issues with
+  `Blocked by #...` lines when earlier design, ADR, or security-control work is
+  required.
 
 ## Pull request baseline
 
@@ -54,6 +57,8 @@ Each implementation PR must include:
   dedicated ADR.
 - Public issues, comments, commits, logs, and CI artifacts must never contain
   live credentials, real vault exports, production tokens, or real passkeys.
+- GitHub secret scanning, push protection, Dependabot security updates, and
+  private vulnerability reporting must stay enabled where GitHub supports them.
 
 ## Repository protection
 

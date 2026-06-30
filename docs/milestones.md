@@ -4,6 +4,10 @@ The project is intentionally split into ordered milestones. Later milestones
 must not start until their prerequisites are merged unless a new ADR changes
 the dependency map.
 
+Milestone issues must encode dependencies directly in their bodies using
+`Blocked by #...` lines. The milestone order in this document is a policy; the
+issue dependency lines are the operational checklist.
+
 ## M0: Governance and security baseline
 
 Goal: make future implementation hard to steer off course.

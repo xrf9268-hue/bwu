@@ -17,6 +17,9 @@ Do not include real vault exports, master passwords, access tokens, refresh
 tokens, passkey private keys, or production account data in issues, commits,
 logs, or screenshots.
 
+Repository-level secret scanning, push protection, and Dependabot security
+updates should remain enabled for this public repository.
+
 ## Secret handling rules
 
 - Never commit real Bitwarden credentials, vault exports, tokens, or passkeys.
