@@ -662,31 +662,31 @@ pub struct RefreshTokenResponse {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SyncResponse {
     /// Profile envelope.
-    #[serde(rename = "Profile")]
+    #[serde(rename = "Profile", alias = "profile")]
     pub profile: Option<Value>,
     /// Folder envelopes.
-    #[serde(rename = "Folders", default)]
+    #[serde(rename = "Folders", alias = "folders", default)]
     pub folders: Vec<Value>,
     /// Collection envelopes.
-    #[serde(rename = "Collections", default)]
+    #[serde(rename = "Collections", alias = "collections", default)]
     pub collections: Vec<Value>,
     /// Cipher envelopes.
-    #[serde(rename = "Ciphers", default)]
+    #[serde(rename = "Ciphers", alias = "ciphers", default)]
     pub ciphers: Vec<Value>,
     /// Domain settings envelope.
-    #[serde(rename = "Domains")]
+    #[serde(rename = "Domains", alias = "domains")]
     pub domains: Option<Value>,
     /// Legacy policy envelopes.
-    #[serde(rename = "Policies", default)]
+    #[serde(rename = "Policies", alias = "policies", default)]
     pub policies: Vec<Value>,
     /// New policy envelopes when present.
-    #[serde(rename = "PoliciesNew")]
+    #[serde(rename = "PoliciesNew", alias = "policiesNew")]
     pub policies_new: Option<Vec<Value>>,
     /// Send envelopes.
-    #[serde(rename = "Sends", default)]
+    #[serde(rename = "Sends", alias = "sends", default)]
     pub sends: Vec<Value>,
     /// User decryption envelope.
-    #[serde(rename = "UserDecryption")]
+    #[serde(rename = "UserDecryption", alias = "userDecryption")]
     pub user_decryption: Option<Value>,
 }
 

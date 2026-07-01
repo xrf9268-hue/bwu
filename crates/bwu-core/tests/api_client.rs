@@ -380,6 +380,55 @@ fn sync_gets_api_endpoint_and_preserves_encrypted_envelope_fields() {
 }
 
 #[test]
+fn sync_parses_lower_camel_envelope_fields() {
+    let mut server = Server::new();
+    let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
+    let _sync_mock = server
+        .mock("GET", "/api/sync")
+        .match_header("authorization", "Bearer synthetic-access-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "profile":{"email":"user@example.test","name":"Synthetic User"},
+                "folders":[{"id":"folder-1","name":"2.encrypted-folder"}],
+                "collections":[{"id":"collection-1","name":"2.encrypted-collection"}],
+                "ciphers":[{"id":"cipher-1","name":"2.encrypted-cipher"}],
+                "domains":{"equivalentDomains":[["example.com","example.org"]]},
+                "policies":[{"id":"policy-1"}],
+                "policiesNew":[{"id":"policy-new-1"}],
+                "sends":[{"id":"send-1","name":"2.encrypted-send"}],
+                "userDecryption":{"masterPasswordUnlock":{"kdf":0}}
+            }"#,
+        )
+        .create();
+
+    let response = ApiClient::new(endpoint)
+        .sync("synthetic-access-token")
+        .expect("lower-camel sync response should parse");
+
+    assert_eq!(
+        response
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.get("email")),
+        Some(&serde_json::json!("user@example.test"))
+    );
+    assert_eq!(response.folders.len(), 1);
+    assert_eq!(response.collections.len(), 1);
+    assert_eq!(response.ciphers.len(), 1);
+    assert!(response.domains.is_some());
+    assert_eq!(response.policies.len(), 1);
+    assert_eq!(
+        response.policies_new.as_ref().map(Vec::len),
+        Some(1),
+        "policiesNew should preserve the optional lower-camel policy envelope"
+    );
+    assert_eq!(response.sends.len(), 1);
+    assert!(response.user_decryption.is_some());
+}
+
+#[test]
 fn api_client_errors_redact_tokens_and_client_secrets() {
     let mut server = Server::new();
     let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
