@@ -153,6 +153,11 @@ pub enum PathError {
         /// Path category that needed an absolute `$HOME`.
         kind: &'static str,
     },
+    /// An explicit command root override was not absolute.
+    RelativeRootOverride {
+        /// Path category whose override was relative.
+        kind: &'static str,
+    },
     /// Filesystem operation failed.
     Io {
         /// Path being created or permissioned.
@@ -169,6 +174,10 @@ impl fmt::Display for PathError {
                 formatter,
                 "cannot resolve bwu {kind} directory without HOME or an explicit root override"
             ),
+            Self::RelativeRootOverride { kind } => write!(
+                formatter,
+                "cannot resolve bwu {kind} directory from a relative root override; root override must be absolute"
+            ),
             Self::Io { path, source } => {
                 write!(
                     formatter,
@@ -183,7 +192,7 @@ impl fmt::Display for PathError {
 impl std::error::Error for PathError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::MissingHome { .. } => None,
+            Self::MissingHome { .. } | Self::RelativeRootOverride { .. } => None,
             Self::Io { source, .. } => Some(source),
         }
     }
@@ -281,8 +290,8 @@ fn data_root(overrides: &RootOverrides) -> Result<PathBuf, PathError> {
 }
 
 fn runtime_root(overrides: &RootOverrides) -> Result<PathBuf, PathError> {
-    if let Some(root) = &overrides.runtime {
-        return Ok(root.clone());
+    if let Some(root) = absolute_override_root(overrides.runtime.as_ref(), "runtime")? {
+        return Ok(root);
     }
     if let Some(root) = absolute_env_root("XDG_RUNTIME_DIR") {
         return Ok(root);
@@ -296,8 +305,8 @@ fn override_or_env(
     home_child: Option<&'static str>,
     kind: &'static str,
 ) -> Result<PathBuf, PathError> {
-    if let Some(root) = override_root {
-        return Ok(root.clone());
+    if let Some(root) = absolute_override_root(override_root, kind)? {
+        return Ok(root);
     }
     if let Some(root) = absolute_env_root(xdg_var) {
         return Ok(root);
@@ -307,6 +316,19 @@ fn override_or_env(
         return Err(PathError::MissingHome { kind });
     };
     Ok(home_root(kind)?.join(home_child))
+}
+
+fn absolute_override_root(
+    override_root: Option<&PathBuf>,
+    kind: &'static str,
+) -> Result<Option<PathBuf>, PathError> {
+    let Some(root) = override_root else {
+        return Ok(None);
+    };
+    if root.is_absolute() {
+        return Ok(Some(root.clone()));
+    }
+    Err(PathError::RelativeRootOverride { kind })
 }
 
 fn absolute_env_root(name: &'static str) -> Option<PathBuf> {

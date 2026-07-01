@@ -215,3 +215,41 @@ fn agent_paths_reject_malformed_home_runtime_fallbacks() {
         fs::remove_dir_all(temp).expect("test temp tree should be removable");
     }
 }
+
+#[test]
+fn agent_paths_reject_relative_runtime_root_override() {
+    let temp = temp_tree("relative-runtime-root");
+    let cwd = temp.join("cwd");
+    let rbw_root = temp.join("rbw");
+    fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+        .args(["status", "--runtime-root", "relative-runtime"])
+        .current_dir(&cwd)
+        .env_remove("HOME")
+        .env_remove("XDG_RUNTIME_DIR")
+        .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+        .output()
+        .expect("bwu-agent binary should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(74),
+        "relative runtime override should fail closed"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+    assert!(
+        stderr.contains("root override must be absolute"),
+        "relative override error should explain the absolute-root requirement:\n{stderr}"
+    );
+    assert!(
+        !cwd.join("relative-runtime").exists(),
+        "relative runtime override must not create cwd-relative state"
+    );
+    assert!(
+        !rbw_root.exists(),
+        "agent command must not create rbw runtime state"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
+}

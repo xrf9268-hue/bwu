@@ -241,6 +241,77 @@ fn cli_paths_reject_malformed_home_fallbacks() {
 }
 
 #[test]
+fn cli_paths_reject_relative_root_overrides() {
+    for (case, invalid_flag, invalid_value) in [
+        ("relative-config-root", "--config-root", "relative-config"),
+        ("relative-cache-root", "--cache-root", "relative-cache"),
+        ("relative-data-root", "--data-root", "relative-data"),
+        (
+            "relative-runtime-root",
+            "--runtime-root",
+            "relative-runtime",
+        ),
+    ] {
+        let temp = temp_tree(case);
+        let cwd = temp.join("cwd");
+        fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+        let mut args = vec![
+            "item".to_string(),
+            "list".to_string(),
+            "--config-root".to_string(),
+            path_arg(&temp.join("config-root")),
+            "--cache-root".to_string(),
+            path_arg(&temp.join("cache-root")),
+            "--data-root".to_string(),
+            path_arg(&temp.join("data-root")),
+            "--runtime-root".to_string(),
+            path_arg(&temp.join("runtime-root")),
+        ];
+        let invalid_index = args
+            .iter()
+            .position(|arg| arg == invalid_flag)
+            .expect("test args should include invalid flag")
+            + 1;
+        args[invalid_index] = invalid_value.to_string();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_bwu"))
+            .args(&args)
+            .current_dir(&cwd)
+            .env_remove("HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .expect("bwu binary should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(74),
+            "{invalid_flag} should reject relative root overrides"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+        assert!(
+            stderr.contains("root override must be absolute"),
+            "relative override error should explain the absolute-root requirement:\n{stderr}"
+        );
+        assert!(
+            !cwd.join(invalid_value).exists(),
+            "relative override must not create cwd-relative state for {invalid_flag}"
+        );
+        for root in ["config-root", "cache-root", "data-root", "runtime-root"] {
+            assert!(
+                !temp.join(root).join("bwu").exists(),
+                "relative override rejection should happen before creating any bwu namespace directories"
+            );
+        }
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
+    }
+}
+
+#[test]
 fn every_planned_command_accepts_temp_root_overrides() {
     let commands = [
         ("account", "status"),
