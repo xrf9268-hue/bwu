@@ -287,7 +287,8 @@ fn runtime_root(overrides: &RootOverrides) -> Result<PathBuf, PathError> {
     if let Some(root) = env::var_os("XDG_RUNTIME_DIR") {
         return Ok(PathBuf::from(root));
     }
-    Ok(env::temp_dir())
+    let home = env::var_os("HOME").ok_or(PathError::MissingHome { kind: "runtime" })?;
+    Ok(PathBuf::from(home).join(".local/run"))
 }
 
 fn override_or_env(

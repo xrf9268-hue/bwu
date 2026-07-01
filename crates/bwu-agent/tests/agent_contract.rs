@@ -93,3 +93,36 @@ fn agent_commands_accept_temp_runtime_root_override() {
         fs::remove_dir_all(temp).expect("test temp tree should be removable");
     }
 }
+
+#[test]
+fn agent_runtime_fallback_is_per_user_when_xdg_runtime_dir_is_unset() {
+    let temp = temp_tree("runtime-fallback");
+    let home = temp.join("home");
+    let shared_tmp = temp.join("shared-tmp");
+    let rbw_root = temp.join("rbw");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+        .arg("status")
+        .env("HOME", &home)
+        .env("TMPDIR", &shared_tmp)
+        .env_remove("XDG_RUNTIME_DIR")
+        .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+        .output()
+        .expect("bwu-agent binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        home.join(".local/run/bwu").is_dir(),
+        "agent should create a user-scoped runtime fallback"
+    );
+    assert!(
+        !shared_tmp.join("bwu").exists(),
+        "agent runtime fallback must not use a shared temp namespace"
+    );
+    assert!(
+        !rbw_root.exists(),
+        "agent command must not create rbw runtime state"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
+}
