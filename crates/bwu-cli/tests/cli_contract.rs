@@ -144,6 +144,53 @@ fn cli_uses_temp_roots_and_does_not_read_user_home_state() {
 }
 
 #[test]
+fn cli_paths_ignore_malformed_xdg_roots() {
+    let temp = temp_tree("malformed-xdg-roots");
+    let home = temp.join("home");
+    let cwd = temp.join("cwd");
+    fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bwu"))
+        .args(["item", "list"])
+        .current_dir(&cwd)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", "relative-config")
+        .env("XDG_CACHE_HOME", "")
+        .env("XDG_DATA_HOME", "relative-data")
+        .env("XDG_RUNTIME_DIR", "relative-runtime")
+        .output()
+        .expect("bwu binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    for expected in [
+        home.join(".config/bwu"),
+        home.join(".cache/bwu"),
+        home.join(".local/share/bwu"),
+        home.join(".local/run/bwu"),
+    ] {
+        assert!(
+            expected.is_dir(),
+            "malformed XDG roots should fall back to a HOME-derived bwu directory: {}",
+            expected.display()
+        );
+    }
+    for unexpected in [
+        cwd.join("relative-config"),
+        cwd.join("bwu"),
+        cwd.join("relative-data"),
+        cwd.join("relative-runtime"),
+    ] {
+        assert!(
+            !unexpected.exists(),
+            "malformed XDG roots must not create relative state: {}",
+            unexpected.display()
+        );
+    }
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
+}
+
+#[test]
 fn every_planned_command_accepts_temp_root_overrides() {
     let commands = [
         ("account", "status"),

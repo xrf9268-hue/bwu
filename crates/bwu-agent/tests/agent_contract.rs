@@ -126,3 +126,42 @@ fn agent_runtime_fallback_is_per_user_when_xdg_runtime_dir_is_unset() {
 
     fs::remove_dir_all(temp).expect("test temp tree should be removable");
 }
+
+#[test]
+fn agent_paths_ignore_malformed_xdg_runtime_dir() {
+    for (case, invalid_runtime, unexpected_relative) in [
+        ("empty-runtime", "", "bwu"),
+        ("relative-runtime", "relative-runtime", "relative-runtime"),
+    ] {
+        let temp = temp_tree(case);
+        let home = temp.join("home");
+        let cwd = temp.join("cwd");
+        let rbw_root = temp.join("rbw");
+        fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+            .arg("status")
+            .current_dir(&cwd)
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", invalid_runtime)
+            .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+            .output()
+            .expect("bwu-agent binary should run");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            home.join(".local/run/bwu").is_dir(),
+            "malformed XDG_RUNTIME_DIR should fall back to a HOME-derived bwu runtime directory"
+        );
+        assert!(
+            !cwd.join(unexpected_relative).exists(),
+            "malformed XDG_RUNTIME_DIR must not create relative runtime state"
+        );
+        assert!(
+            !rbw_root.exists(),
+            "agent command must not create rbw runtime state"
+        );
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
+    }
+}

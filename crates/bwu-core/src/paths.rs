@@ -284,8 +284,8 @@ fn runtime_root(overrides: &RootOverrides) -> Result<PathBuf, PathError> {
     if let Some(root) = &overrides.runtime {
         return Ok(root.clone());
     }
-    if let Some(root) = env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(root));
+    if let Some(root) = absolute_env_root("XDG_RUNTIME_DIR") {
+        return Ok(root);
     }
     let home = env::var_os("HOME").ok_or(PathError::MissingHome { kind: "runtime" })?;
     Ok(PathBuf::from(home).join(".local/run"))
@@ -300,8 +300,8 @@ fn override_or_env(
     if let Some(root) = override_root {
         return Ok(root.clone());
     }
-    if let Some(root) = env::var_os(xdg_var) {
-        return Ok(PathBuf::from(root));
+    if let Some(root) = absolute_env_root(xdg_var) {
+        return Ok(root);
     }
 
     let Some(home_child) = home_child else {
@@ -309,6 +309,11 @@ fn override_or_env(
     };
     let home = env::var_os("HOME").ok_or(PathError::MissingHome { kind })?;
     Ok(PathBuf::from(home).join(home_child))
+}
+
+fn absolute_env_root(name: &'static str) -> Option<PathBuf> {
+    let root = PathBuf::from(env::var_os(name)?);
+    root.is_absolute().then_some(root)
 }
 
 fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
