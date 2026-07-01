@@ -191,6 +191,56 @@ fn cli_paths_ignore_malformed_xdg_roots() {
 }
 
 #[test]
+fn cli_paths_reject_malformed_home_fallbacks() {
+    for (case, home, unexpected_home_root) in [
+        ("empty-home", "", ".config"),
+        ("relative-home", "relative-home", "relative-home"),
+    ] {
+        let temp = temp_tree(case);
+        let cwd = temp.join("cwd");
+        fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_bwu"))
+            .args(["item", "list"])
+            .current_dir(&cwd)
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", "relative-config")
+            .env("XDG_CACHE_HOME", "")
+            .env("XDG_DATA_HOME", "relative-data")
+            .env("XDG_RUNTIME_DIR", "relative-runtime")
+            .output()
+            .expect("bwu binary should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(74),
+            "malformed HOME should fail closed instead of creating relative state"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+        assert!(
+            stderr.contains("without HOME or an explicit root override"),
+            "path error should explain the missing usable HOME fallback:\n{stderr}"
+        );
+        for unexpected in [
+            cwd.join(unexpected_home_root),
+            cwd.join(".cache"),
+            cwd.join(".local"),
+            cwd.join("relative-config"),
+            cwd.join("relative-data"),
+            cwd.join("relative-runtime"),
+        ] {
+            assert!(
+                !unexpected.exists(),
+                "malformed HOME/XDG roots must not create relative state: {}",
+                unexpected.display()
+            );
+        }
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
+    }
+}
+
+#[test]
 fn every_planned_command_accepts_temp_root_overrides() {
     let commands = [
         ("account", "status"),

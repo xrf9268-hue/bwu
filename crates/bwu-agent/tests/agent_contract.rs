@@ -165,3 +165,53 @@ fn agent_paths_ignore_malformed_xdg_runtime_dir() {
         fs::remove_dir_all(temp).expect("test temp tree should be removable");
     }
 }
+
+#[test]
+fn agent_paths_reject_malformed_home_runtime_fallbacks() {
+    for (case, home, unexpected_home_root) in [
+        ("empty-home", "", ".local"),
+        ("relative-home", "relative-home", "relative-home"),
+    ] {
+        let temp = temp_tree(case);
+        let cwd = temp.join("cwd");
+        let rbw_root = temp.join("rbw");
+        fs::create_dir_all(&cwd).expect("test working directory should be creatable");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+            .arg("status")
+            .current_dir(&cwd)
+            .env("HOME", home)
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+            .output()
+            .expect("bwu-agent binary should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(74),
+            "malformed HOME should fail closed instead of creating relative runtime state"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+        assert!(
+            stderr.contains("without HOME or an explicit root override"),
+            "path error should explain the missing usable HOME fallback:\n{stderr}"
+        );
+        for unexpected in [
+            cwd.join(unexpected_home_root),
+            cwd.join(".local"),
+            cwd.join("bwu"),
+        ] {
+            assert!(
+                !unexpected.exists(),
+                "malformed HOME must not create relative runtime state: {}",
+                unexpected.display()
+            );
+        }
+        assert!(
+            !rbw_root.exists(),
+            "agent command must not create rbw runtime state"
+        );
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
+    }
+}

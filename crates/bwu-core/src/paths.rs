@@ -148,9 +148,9 @@ impl RuntimePaths {
 /// Path resolution or creation failure.
 #[derive(Debug)]
 pub enum PathError {
-    /// A default path needs `$HOME`, but it is unavailable.
+    /// A default path needs an absolute `$HOME`, but it is unavailable.
     MissingHome {
-        /// Path category that needed `$HOME`.
+        /// Path category that needed an absolute `$HOME`.
         kind: &'static str,
     },
     /// Filesystem operation failed.
@@ -287,8 +287,7 @@ fn runtime_root(overrides: &RootOverrides) -> Result<PathBuf, PathError> {
     if let Some(root) = absolute_env_root("XDG_RUNTIME_DIR") {
         return Ok(root);
     }
-    let home = env::var_os("HOME").ok_or(PathError::MissingHome { kind: "runtime" })?;
-    Ok(PathBuf::from(home).join(".local/run"))
+    Ok(home_root("runtime")?.join(".local/run"))
 }
 
 fn override_or_env(
@@ -307,13 +306,19 @@ fn override_or_env(
     let Some(home_child) = home_child else {
         return Err(PathError::MissingHome { kind });
     };
-    let home = env::var_os("HOME").ok_or(PathError::MissingHome { kind })?;
-    Ok(PathBuf::from(home).join(home_child))
+    Ok(home_root(kind)?.join(home_child))
 }
 
 fn absolute_env_root(name: &'static str) -> Option<PathBuf> {
     let root = PathBuf::from(env::var_os(name)?);
     root.is_absolute().then_some(root)
+}
+
+fn home_root(kind: &'static str) -> Result<PathBuf, PathError> {
+    let root = PathBuf::from(env::var_os("HOME").ok_or(PathError::MissingHome { kind })?);
+    root.is_absolute()
+        .then_some(root)
+        .ok_or(PathError::MissingHome { kind })
 }
 
 fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
