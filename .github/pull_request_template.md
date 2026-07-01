@@ -16,5 +16,5 @@ Refs #
 ## Verification
 
 ```text
-paste command output here
+paste redacted command output here; omit secrets and private account data
 ```
