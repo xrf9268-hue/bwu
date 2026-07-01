@@ -9,6 +9,7 @@ use reqwest::{StatusCode, blocking::Response};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use url::Url;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const US_WEB_VAULT_URL: &str = "https://vault.bitwarden.com";
 const US_API_URL: &str = "https://api.bitwarden.com";
@@ -19,26 +20,25 @@ const EU_IDENTITY_URL: &str = "https://identity.bitwarden.eu";
 const DEFAULT_SCOPE: &str = "api offline_access";
 
 /// Redacted secret string used for token material and request secrets.
-#[derive(Clone, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct SecretString(String);
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {
     /// Creates a secret string from caller-provided material.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Zeroizing::new(value.into()))
     }
 
     /// Exposes the secret for building an outbound protocol request.
     fn expose_for_request(&self) -> &str {
-        &self.0
+        self.as_str()
     }
 
     /// Exposes the value to callers that intentionally need token storage.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -56,12 +56,20 @@ impl Deref for SecretString {
     }
 }
 
+impl Zeroize for SecretString {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretString {}
+
 impl<'de> Deserialize<'de> for SecretString {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer).map(Self)
+        String::deserialize(deserializer).map(Self::new)
     }
 }
 

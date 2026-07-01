@@ -1,8 +1,15 @@
 use bwu_core::api::{
     ApiClient, ApiKeyTokenRequest, Device, EndpointConfig, PasswordTokenRequest, PreloginRequest,
-    RefreshTokenRequest,
+    RefreshTokenRequest, SecretString,
 };
 use mockito::{Matcher, Server};
+
+#[test]
+fn secret_string_has_zeroizing_drop_contract() {
+    fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    assert_zeroizes_on_drop::<SecretString>();
+}
 
 #[test]
 fn endpoint_model_builds_us_eu_and_self_hosted_urls() {
