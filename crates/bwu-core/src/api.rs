@@ -210,8 +210,10 @@ fn parse_base_url(input: &str) -> Result<Url, EndpointConfigError> {
             message: "endpoint URL must use http or https".to_owned(),
         });
     }
-    if url.path().is_empty() {
-        url.set_path("/");
+    if !url.path().ends_with('/') {
+        let mut path = url.path().to_owned();
+        path.push('/');
+        url.set_path(&path);
     }
     Ok(url)
 }
@@ -236,16 +238,16 @@ impl PreloginRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 pub struct PreloginResponse {
     /// KDF algorithm identifier from the server.
-    #[serde(rename = "Kdf")]
+    #[serde(rename = "Kdf", alias = "kdf")]
     pub kdf: u32,
     /// PBKDF2 iterations or Argon2id iterations, depending on `kdf`.
-    #[serde(rename = "KdfIterations")]
+    #[serde(rename = "KdfIterations", alias = "kdfIterations")]
     pub kdf_iterations: u32,
     /// Argon2 memory parameter when returned by the server.
-    #[serde(rename = "KdfMemory")]
+    #[serde(rename = "KdfMemory", alias = "kdfMemory")]
     pub kdf_memory: Option<u32>,
     /// Argon2 parallelism parameter when returned by the server.
-    #[serde(rename = "KdfParallelism")]
+    #[serde(rename = "KdfParallelism", alias = "kdfParallelism")]
     pub kdf_parallelism: Option<u32>,
 }
 
@@ -435,6 +437,85 @@ impl fmt::Debug for RefreshTokenRequest {
     }
 }
 
+/// Token response decryption options used by trusted-device and key-connector flows.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct UserDecryptionOptions {
+    /// Whether the user has a master password available for vault decryption.
+    #[serde(rename = "HasMasterPassword", alias = "hasMasterPassword")]
+    pub has_master_password: Option<bool>,
+    /// Master-password unlock envelope for the account user key.
+    #[serde(rename = "MasterPasswordUnlock", alias = "masterPasswordUnlock")]
+    pub master_password_unlock: Option<MasterPasswordUnlockOption>,
+    /// WebAuthn PRF decryption envelope.
+    #[serde(rename = "WebAuthnPrfOption", alias = "webAuthnPrfOption")]
+    pub webauthn_prf_option: Option<WebAuthnPrfOption>,
+    /// Trusted-device decryption envelope.
+    #[serde(rename = "TrustedDeviceOption", alias = "trustedDeviceOption")]
+    pub trusted_device_option: Option<TrustedDeviceOption>,
+    /// Key Connector decryption envelope.
+    #[serde(rename = "KeyConnectorOption", alias = "keyConnectorOption")]
+    pub key_connector_option: Option<KeyConnectorOption>,
+}
+
+/// Master-password unlock decryption envelope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct MasterPasswordUnlockOption {
+    /// User key encrypted by the master key.
+    #[serde(rename = "MasterKeyWrappedUserKey", alias = "masterKeyWrappedUserKey")]
+    pub master_key_wrapped_user_key: Option<SecretString>,
+}
+
+/// Trusted-device decryption envelope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct TrustedDeviceOption {
+    /// Whether admin approval is available for trusted-device login.
+    #[serde(rename = "HasAdminApproval", alias = "hasAdminApproval")]
+    pub has_admin_approval: Option<bool>,
+    /// Whether another trusted device can approve login.
+    #[serde(rename = "HasLoginApprovingDevice", alias = "hasLoginApprovingDevice")]
+    pub has_login_approving_device: Option<bool>,
+    /// Whether the user can manage reset-password setup.
+    #[serde(
+        rename = "HasManageResetPasswordPermission",
+        alias = "hasManageResetPasswordPermission"
+    )]
+    pub has_manage_reset_password_permission: Option<bool>,
+    /// Whether trusted-device offboarding is in progress.
+    #[serde(rename = "IsTdeOffboarding", alias = "isTdeOffboarding")]
+    pub is_tde_offboarding: Option<bool>,
+    /// Device-key-encrypted private key for a trusted device.
+    #[serde(rename = "EncryptedPrivateKey", alias = "encryptedPrivateKey")]
+    pub encrypted_private_key: Option<SecretString>,
+    /// Public-key-encrypted user key for a trusted device.
+    #[serde(rename = "EncryptedUserKey", alias = "encryptedUserKey")]
+    pub encrypted_user_key: Option<SecretString>,
+}
+
+/// WebAuthn PRF decryption envelope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct WebAuthnPrfOption {
+    /// PRF-encrypted private key.
+    #[serde(rename = "EncryptedPrivateKey", alias = "encryptedPrivateKey")]
+    pub encrypted_private_key: SecretString,
+    /// PRF-encrypted user key.
+    #[serde(rename = "EncryptedUserKey", alias = "encryptedUserKey")]
+    pub encrypted_user_key: SecretString,
+    /// Credential identifier used by the WebAuthn PRF option.
+    #[serde(rename = "CredentialId", alias = "credentialId")]
+    pub credential_id: String,
+    /// Authenticator transports reported for the credential.
+    #[serde(rename = "Transports", alias = "transports", default)]
+    pub transports: Vec<String>,
+}
+
+/// Key Connector decryption envelope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct KeyConnectorOption {
+    /// Key Connector service URL.
+    #[serde(rename = "KeyConnectorUrl", alias = "keyConnectorUrl")]
+    pub key_connector_url: String,
+}
+
 /// Successful Identity token response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 pub struct TokenResponse {
@@ -473,9 +554,9 @@ pub struct TokenResponse {
     /// API-key login Key Connector flag.
     #[serde(rename = "ApiUseKeyConnector")]
     pub api_use_key_connector: Option<bool>,
-    /// User decryption options are kept structured but opaque for later crypto work.
+    /// User decryption options needed by later auth and crypto work.
     #[serde(rename = "UserDecryptionOptions")]
-    pub user_decryption_options: Option<Value>,
+    pub user_decryption_options: Option<UserDecryptionOptions>,
     /// Master password policy envelope for later auth work.
     #[serde(rename = "MasterPasswordPolicy")]
     pub master_password_policy: Option<Value>,

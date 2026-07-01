@@ -1,6 +1,6 @@
 use bwu_core::api::{
     ApiClient, ApiKeyTokenRequest, Device, EndpointConfig, PasswordTokenRequest, PreloginRequest,
-    RefreshTokenRequest, SecretString,
+    RefreshTokenRequest, SecretString, TokenResponse,
 };
 use mockito::{Matcher, Server};
 
@@ -61,6 +61,35 @@ fn endpoint_model_builds_us_eu_and_self_hosted_urls() {
 }
 
 #[test]
+fn endpoint_model_preserves_path_roots_without_trailing_slash() {
+    let self_hosted = EndpointConfig::self_hosted("https://vault.example.test/bw")
+        .expect("valid self-hosted subpath URL");
+    assert_eq!(
+        self_hosted.prelogin_url().as_str(),
+        "https://vault.example.test/bw/identity/accounts/prelogin/password"
+    );
+    assert_eq!(
+        self_hosted.sync_url(false).as_str(),
+        "https://vault.example.test/bw/api/sync"
+    );
+
+    let custom = EndpointConfig::custom(
+        "https://vault.example.test/root",
+        "https://vault.example.test/root/api",
+        "https://vault.example.test/root/identity",
+    )
+    .expect("valid custom subpath URLs");
+    assert_eq!(
+        custom.token_url().as_str(),
+        "https://vault.example.test/root/identity/connect/token"
+    );
+    assert_eq!(
+        custom.sync_url(false).as_str(),
+        "https://vault.example.test/root/api/sync"
+    );
+}
+
+#[test]
 fn prelogin_posts_to_identity_endpoint_and_parses_kdf_response() {
     let mut server = Server::new();
     let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
@@ -84,6 +113,27 @@ fn prelogin_posts_to_identity_endpoint_and_parses_kdf_response() {
 
     assert_eq!(response.kdf, 0);
     assert_eq!(response.kdf_iterations, 600000);
+}
+
+#[test]
+fn prelogin_parses_lower_camel_response_fields() {
+    let mut server = Server::new();
+    let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
+    let _mock = server
+        .mock("POST", "/identity/accounts/prelogin/password")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"kdf":1,"kdfIterations":3,"kdfMemory":64,"kdfParallelism":4}"#)
+        .create();
+
+    let response = ApiClient::new(endpoint)
+        .prelogin(&PreloginRequest::new("user@example.test"))
+        .expect("lower-camel prelogin response should parse");
+
+    assert_eq!(response.kdf, 1);
+    assert_eq!(response.kdf_iterations, 3);
+    assert_eq!(response.kdf_memory, Some(64));
+    assert_eq!(response.kdf_parallelism, Some(4));
 }
 
 #[test]
@@ -180,6 +230,54 @@ fn token_exchange_and_refresh_parse_structured_response_fields() {
     assert_eq!(
         refresh_response.refresh_token.as_deref(),
         Some("synthetic-rotated-refresh-token")
+    );
+}
+
+#[test]
+fn token_response_debug_redacts_nested_user_decryption_options() {
+    let response: TokenResponse = serde_json::from_str(
+        r#"{
+            "access_token":"synthetic-access-token",
+            "expires_in":3600,
+            "refresh_token":"synthetic-refresh-token",
+            "token_type":"Bearer",
+            "UserDecryptionOptions":{
+                "HasMasterPassword":true,
+                "TrustedDeviceOption":{
+                    "HasAdminApproval":true,
+                    "HasLoginApprovingDevice":true,
+                    "HasManageResetPasswordPermission":false,
+                    "IsTdeOffboarding":false,
+                    "EncryptedPrivateKey":"2.synthetic-trusted-device-private-key",
+                    "EncryptedUserKey":"2.synthetic-trusted-device-user-key"
+                },
+                "WebAuthnPrfOption":{
+                    "EncryptedPrivateKey":"2.synthetic-prf-private-key",
+                    "EncryptedUserKey":"2.synthetic-prf-user-key",
+                    "CredentialId":"synthetic-credential-id",
+                    "Transports":["usb"]
+                }
+            }
+        }"#,
+    )
+    .expect("token response should parse nested decryption options");
+
+    let rendered = format!("{response:?}");
+
+    for secret in [
+        "2.synthetic-trusted-device-private-key",
+        "2.synthetic-trusted-device-user-key",
+        "2.synthetic-prf-private-key",
+        "2.synthetic-prf-user-key",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "TokenResponse debug leaked nested secret {secret:?}: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("<redacted>"),
+        "TokenResponse debug should make nested secret redaction visible: {rendered}"
     );
 }
 
