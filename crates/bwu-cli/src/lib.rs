@@ -46,8 +46,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutcome {
         return CommandOutcome::success(help_text());
     }
 
-    if bwu_core::command::is_planned_bwu_group(&args) {
-        let operation = args.join(" ");
+    if let Some(operation) = bwu_core::command::planned_bwu_operation_label(&args) {
         return CommandOutcome::error(
             NOT_IMPLEMENTED_EXIT,
             format!("{}\n", NotImplemented::new("bwu", operation)),

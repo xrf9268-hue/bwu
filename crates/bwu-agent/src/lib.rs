@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use bwu_core::{
     NotImplemented,
-    command::{AGENT_COMMANDS, is_planned_agent_operation, wants_help},
+    command::{AGENT_COMMANDS, planned_agent_operation_label, wants_help},
     namespace::{AGENT_DEFAULT_TIMEOUT_SECONDS, AGENT_SOCKET_NAME, RUNTIME_DIR_NAME},
 };
 
@@ -50,10 +50,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> AgentOutcome {
         return AgentOutcome::success(help_text());
     }
 
-    if is_planned_agent_operation(&args) {
+    if let Some(operation) = planned_agent_operation_label(&args) {
         return AgentOutcome::error(
             NOT_IMPLEMENTED_EXIT,
-            format!("{}\n", NotImplemented::agent(args.join(" "))),
+            format!("{}\n", NotImplemented::agent(operation)),
         );
     }
 

@@ -73,6 +73,30 @@ pub fn is_planned_bwu_group(args: &[String]) -> bool {
     })
 }
 
+/// Builds a safe planned `bwu` operation label without echoing raw arguments.
+#[must_use]
+pub fn planned_bwu_operation_label(args: &[String]) -> Option<String> {
+    let group_name = args.first()?.as_str();
+    let group = BWU_COMMANDS.iter().find(|group| group.name == group_name)?;
+
+    let mut label = group.name.to_string();
+    if let Some(operation) = args
+        .get(1)
+        .and_then(|candidate| {
+            group
+                .operations
+                .iter()
+                .find(|operation| **operation == candidate.as_str())
+        })
+        .copied()
+    {
+        label.push(' ');
+        label.push_str(operation);
+    }
+
+    Some(label)
+}
+
 /// Returns true when the first argument is a planned agent operation.
 #[must_use]
 pub fn is_planned_agent_operation(args: &[String]) -> bool {
@@ -81,5 +105,17 @@ pub fn is_planned_agent_operation(args: &[String]) -> bool {
             .operations
             .iter()
             .any(|operation| operation == &candidate.as_str())
+    })
+}
+
+/// Builds a safe planned `bwu-agent` operation label without echoing raw arguments.
+#[must_use]
+pub fn planned_agent_operation_label(args: &[String]) -> Option<&'static str> {
+    args.first().and_then(|candidate| {
+        AGENT_COMMANDS[0]
+            .operations
+            .iter()
+            .find(|operation| **operation == candidate.as_str())
+            .copied()
     })
 }
