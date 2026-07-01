@@ -6,7 +6,7 @@
 use std::{fmt, ops::Deref};
 
 use reqwest::{StatusCode, blocking::Response};
-use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned, ser::SerializeStruct};
 use serde_json::Value;
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -269,14 +269,6 @@ impl Device {
             identifier: identifier.into(),
         }
     }
-
-    fn append_form_pairs(&self, pairs: &mut Vec<(String, String)>) {
-        pairs.extend([
-            ("deviceType".to_owned(), self.device_type.to_string()),
-            ("deviceName".to_owned(), self.name.clone()),
-            ("deviceIdentifier".to_owned(), self.identifier.clone()),
-        ]);
-    }
 }
 
 impl fmt::Debug for Device {
@@ -316,19 +308,8 @@ impl PasswordTokenRequest {
         }
     }
 
-    fn form_pairs(&self) -> Vec<(String, String)> {
-        let mut pairs = vec![
-            ("scope".to_owned(), DEFAULT_SCOPE.to_owned()),
-            ("client_id".to_owned(), self.client_id.clone()),
-            ("grant_type".to_owned(), "password".to_owned()),
-            ("username".to_owned(), self.email.clone()),
-            (
-                "password".to_owned(),
-                self.master_password_hash.expose_for_request().to_owned(),
-            ),
-        ];
-        self.device.append_form_pairs(&mut pairs);
-        pairs
+    fn form_pairs(&self) -> PasswordTokenForm<'_> {
+        PasswordTokenForm { request: self }
     }
 }
 
@@ -367,23 +348,15 @@ impl ApiKeyTokenRequest {
         }
     }
 
-    fn form_pairs(&self) -> Vec<(String, String)> {
-        let scope = if self.client_id.starts_with("organization") {
-            "api.organization"
-        } else {
-            "api"
-        };
-        let mut pairs = vec![
-            ("scope".to_owned(), scope.to_owned()),
-            ("client_id".to_owned(), self.client_id.clone()),
-            (
-                "client_secret".to_owned(),
-                self.client_secret.expose_for_request().to_owned(),
-            ),
-            ("grant_type".to_owned(), "client_credentials".to_owned()),
-        ];
-        self.device.append_form_pairs(&mut pairs);
-        pairs
+    fn form_pairs(&self) -> ApiKeyTokenForm<'_> {
+        ApiKeyTokenForm {
+            request: self,
+            scope: if self.client_id.starts_with("organization") {
+                "api.organization"
+            } else {
+                "api"
+            },
+        }
     }
 }
 
@@ -415,15 +388,8 @@ impl RefreshTokenRequest {
         }
     }
 
-    fn form_pairs(&self) -> Vec<(String, String)> {
-        vec![
-            ("grant_type".to_owned(), "refresh_token".to_owned()),
-            ("client_id".to_owned(), self.client_id.clone()),
-            (
-                "refresh_token".to_owned(),
-                self.refresh_token.expose_for_request().to_owned(),
-            ),
-        ]
+    fn form_pairs(&self) -> RefreshTokenForm<'_> {
+        RefreshTokenForm { request: self }
     }
 }
 
@@ -435,6 +401,123 @@ impl fmt::Debug for RefreshTokenRequest {
             .field("refresh_token", &self.refresh_token)
             .finish()
     }
+}
+
+struct PasswordTokenForm<'a> {
+    request: &'a PasswordTokenRequest,
+}
+
+impl Serialize for PasswordTokenForm<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut form = serializer.serialize_struct("PasswordTokenForm", 8)?;
+        form.serialize_field("scope", DEFAULT_SCOPE)?;
+        form.serialize_field("client_id", &self.request.client_id)?;
+        form.serialize_field("grant_type", "password")?;
+        form.serialize_field("username", &self.request.email)?;
+        form.serialize_field(
+            "password",
+            self.request.master_password_hash.expose_for_request(),
+        )?;
+        serialize_device_form_fields(&mut form, &self.request.device)?;
+        form.end()
+    }
+}
+
+impl fmt::Debug for PasswordTokenForm<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasswordTokenForm")
+            .field("scope", &DEFAULT_SCOPE)
+            .field("client_id", &self.request.client_id)
+            .field("grant_type", &"password")
+            .field("username", &self.request.email)
+            .field("password", &self.request.master_password_hash)
+            .field("device", &self.request.device)
+            .finish()
+    }
+}
+
+struct ApiKeyTokenForm<'a> {
+    request: &'a ApiKeyTokenRequest,
+    scope: &'static str,
+}
+
+impl Serialize for ApiKeyTokenForm<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut form = serializer.serialize_struct("ApiKeyTokenForm", 7)?;
+        form.serialize_field("scope", self.scope)?;
+        form.serialize_field("client_id", &self.request.client_id)?;
+        form.serialize_field(
+            "client_secret",
+            self.request.client_secret.expose_for_request(),
+        )?;
+        form.serialize_field("grant_type", "client_credentials")?;
+        serialize_device_form_fields(&mut form, &self.request.device)?;
+        form.end()
+    }
+}
+
+impl fmt::Debug for ApiKeyTokenForm<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApiKeyTokenForm")
+            .field("scope", &self.scope)
+            .field("client_id", &self.request.client_id)
+            .field("client_secret", &self.request.client_secret)
+            .field("grant_type", &"client_credentials")
+            .field("device", &self.request.device)
+            .finish()
+    }
+}
+
+struct RefreshTokenForm<'a> {
+    request: &'a RefreshTokenRequest,
+}
+
+impl Serialize for RefreshTokenForm<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut form = serializer.serialize_struct("RefreshTokenForm", 3)?;
+        form.serialize_field("grant_type", "refresh_token")?;
+        form.serialize_field("client_id", &self.request.client_id)?;
+        form.serialize_field(
+            "refresh_token",
+            self.request.refresh_token.expose_for_request(),
+        )?;
+        form.end()
+    }
+}
+
+impl fmt::Debug for RefreshTokenForm<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RefreshTokenForm")
+            .field("grant_type", &"refresh_token")
+            .field("client_id", &self.request.client_id)
+            .field("refresh_token", &self.request.refresh_token)
+            .finish()
+    }
+}
+
+fn serialize_device_form_fields<S>(
+    form: &mut S,
+    device: &Device,
+) -> Result<(), <S as SerializeStruct>::Error>
+where
+    S: SerializeStruct,
+{
+    form.serialize_field("deviceType", &device.device_type)?;
+    form.serialize_field("deviceName", &device.name)?;
+    form.serialize_field("deviceIdentifier", &device.identifier)?;
+    Ok(())
 }
 
 /// Token response decryption options used by trusted-device and key-connector flows.
@@ -641,7 +724,8 @@ impl ApiClient {
         &self,
         request: &PasswordTokenRequest,
     ) -> Result<TokenResponse, ApiClientError> {
-        self.post_token_form(&request.form_pairs())
+        let form = request.form_pairs();
+        self.post_token_form(&form)
     }
 
     /// Exchanges API-key credentials for an Identity token response.
@@ -649,7 +733,8 @@ impl ApiClient {
         &self,
         request: &ApiKeyTokenRequest,
     ) -> Result<TokenResponse, ApiClientError> {
-        self.post_token_form(&request.form_pairs())
+        let form = request.form_pairs();
+        self.post_token_form(&form)
     }
 
     /// Refreshes an access token using a refresh token.
@@ -658,10 +743,11 @@ impl ApiClient {
         request: &RefreshTokenRequest,
     ) -> Result<RefreshTokenResponse, ApiClientError> {
         let url = self.endpoint.token_url();
+        let form = request.form_pairs();
         let response = self
             .http
             .post(url.clone())
-            .form(&request.form_pairs())
+            .form(&form)
             .send()
             .map_err(|source| ApiClientError::transport("POST", &url, source))?;
         parse_json_response("POST", &url, response)
@@ -679,15 +765,15 @@ impl ApiClient {
         parse_json_response("GET", &url, response)
     }
 
-    fn post_token_form(
-        &self,
-        form_pairs: &[(String, String)],
-    ) -> Result<TokenResponse, ApiClientError> {
+    fn post_token_form<T>(&self, form: &T) -> Result<TokenResponse, ApiClientError>
+    where
+        T: Serialize + ?Sized,
+    {
         let url = self.endpoint.token_url();
         let response = self
             .http
             .post(url.clone())
-            .form(form_pairs)
+            .form(form)
             .send()
             .map_err(|source| ApiClientError::transport("POST", &url, source))?;
         parse_json_response("POST", &url, response)
@@ -798,5 +884,45 @@ fn redacted_path(url: &Url) -> String {
     match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
         None => url.path().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_request_form_material_debug_redacts_request_secrets() {
+        let device = Device::new(25, "Linux CLI", "synthetic-device-id");
+        let password_request = PasswordTokenRequest::new(
+            "user@example.test",
+            "synthetic-master-hash",
+            "synthetic-client-id",
+            device.clone(),
+        );
+        let password_form = password_request.form_pairs();
+        let api_key_request =
+            ApiKeyTokenRequest::new("organization.synthetic", "synthetic-client-secret", device);
+        let api_key_form = api_key_request.form_pairs();
+        let refresh_request = RefreshTokenRequest::new("web", "synthetic-refresh-token");
+        let refresh_form = refresh_request.form_pairs();
+
+        let rendered = format!("{password_form:?}\n{api_key_form:?}\n{refresh_form:?}");
+
+        for secret in [
+            "synthetic-master-hash",
+            "synthetic-client-secret",
+            "synthetic-refresh-token",
+            "synthetic-device-id",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "token form debug leaked request secret {secret:?}: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("<redacted>"),
+            "token form debug should show explicit redaction markers: {rendered}"
+        );
     }
 }
