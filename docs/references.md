@@ -37,6 +37,8 @@ before implementing it.
 - [W3C Web Authentication Level 3](https://www.w3.org/TR/webauthn-3/) -
   PublicKeyCredential request/response shapes, authenticator data, assertion
   signatures, user consent expectations, and relying party scoping.
+- [RFC 4648: Base-N Encodings](https://www.rfc-editor.org/rfc/rfc4648) -
+  base64 and base64url encoding rules.
 - [RFC 6238: TOTP](https://www.rfc-editor.org/rfc/rfc6238) - time-based OTP
   algorithm.
 - [RFC 4226: HOTP](https://www.rfc-editor.org/rfc/rfc4226) - HMAC-based OTP
@@ -58,6 +60,13 @@ before implementing it.
   public-repository secret detection and push protection.
 - [Dependabot Security Updates](https://docs.github.com/en/code-security/dependabot/dependabot-security-updates/about-dependabot-security-updates) -
   dependency security update workflow.
+- [GitHub Repository Rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) -
+  branch and tag ruleset behavior for repository governance.
+- [GitHub Actions security hardening](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions) -
+  least-privilege workflow permissions, secret handling, and untrusted input
+  guidance.
+- [GitHub Actions workflow artifacts](https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts) -
+  artifact upload and retention behavior.
 - [Cargo Book: Continuous Integration](https://doc.rust-lang.org/cargo/guide/continuous-integration.html) -
   Rust CI baseline.
 - [Cargo Book: Profiles](https://doc.rust-lang.org/cargo/reference/profiles.html) -

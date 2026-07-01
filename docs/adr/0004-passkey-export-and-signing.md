@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Refined by [ADR 0008](0008-passkey-export-and-signing-edge-policy.md).
 
 ## Context
 
