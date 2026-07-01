@@ -1,10 +1,28 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn run_agent(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
         .args(args)
         .output()
         .expect("bwu-agent binary should run")
+}
+
+fn temp_tree(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("bwu-agent-{name}-{}", std::process::id()));
+    if path.exists() {
+        fs::remove_dir_all(&path).expect("stale test tree should be removable");
+    }
+    path
+}
+
+fn path_arg(path: &Path) -> String {
+    path.to_str()
+        .expect("temporary test path should be utf-8")
+        .to_string()
 }
 
 #[test]
@@ -43,4 +61,35 @@ fn agent_start_fails_with_explicit_not_implemented_error() {
         stderr.contains("Unix socket agent"),
         "agent error should preserve the local-socket boundary:\n{stderr}"
     );
+}
+
+#[test]
+fn agent_commands_accept_temp_runtime_root_override() {
+    for operation in ["start", "stop", "status"] {
+        let temp = temp_tree(operation);
+        let rbw_root = temp.join("rbw");
+        let output = Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+            .args([
+                operation,
+                "--runtime-root",
+                path_arg(&temp.join("runtime-root")).as_str(),
+            ])
+            .env_remove("HOME")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+            .output()
+            .expect("bwu-agent binary should run");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            temp.join("runtime-root").join("bwu").is_dir(),
+            "agent command should create bwu runtime directory"
+        );
+        assert!(
+            !rbw_root.exists(),
+            "agent command must not create rbw runtime state"
+        );
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
+    }
 }

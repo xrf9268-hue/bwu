@@ -7,6 +7,9 @@
 pub mod command;
 pub mod error;
 pub mod namespace;
+pub mod paths;
+pub mod redaction;
 
 pub use command::{AGENT_COMMANDS, BWU_COMMANDS, CommandGroup};
 pub use error::{M1_BOUNDARY, NotImplemented};
+pub use redaction::SecretString;

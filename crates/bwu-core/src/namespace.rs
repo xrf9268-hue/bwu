@@ -9,6 +9,9 @@ pub const CONFIG_DIR_NAME: &str = "bwu";
 /// Cache directory name under the platform-specific user cache root.
 pub const CACHE_DIR_NAME: &str = "bwu";
 
+/// Data directory name under the platform-specific user data root.
+pub const DATA_DIR_NAME: &str = "bwu";
+
 /// Runtime directory name for local sockets and process state.
 pub const RUNTIME_DIR_NAME: &str = "bwu";
 

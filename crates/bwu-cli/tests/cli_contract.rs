@@ -1,8 +1,41 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn run_bwu(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bwu"))
         .args(args)
+        .output()
+        .expect("bwu binary should run")
+}
+
+fn temp_tree(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("bwu-cli-{name}-{}", std::process::id()));
+    if path.exists() {
+        fs::remove_dir_all(&path).expect("stale test tree should be removable");
+    }
+    path
+}
+
+fn path_arg(path: &Path) -> String {
+    path.to_str()
+        .expect("temporary test path should be utf-8")
+        .to_string()
+}
+
+fn run_bwu_without_home(args: &[String], rbw_root: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_bwu"))
+        .args(args)
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_RUNTIME_DIR")
+        .env("RBW_CONFIG_HOME", rbw_root.join("config"))
+        .env("RBW_CACHE_HOME", rbw_root.join("cache"))
+        .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
         .output()
         .expect("bwu binary should run")
 }
@@ -67,5 +100,94 @@ fn bwu_not_implemented_errors_do_not_echo_secret_arguments() {
             !stderr.contains(leaked),
             "not-implemented error leaked secret argument {leaked:?}:\n{stderr}"
         );
+    }
+}
+
+#[test]
+fn cli_uses_temp_roots_and_does_not_read_user_home_state() {
+    let temp = temp_tree("temp-roots");
+    let rbw_root = temp.join("rbw");
+    let args = vec![
+        "item".to_string(),
+        "list".to_string(),
+        "--config-root".to_string(),
+        path_arg(&temp.join("config-root")),
+        "--cache-root".to_string(),
+        path_arg(&temp.join("cache-root")),
+        "--data-root".to_string(),
+        path_arg(&temp.join("data-root")),
+        "--runtime-root".to_string(),
+        path_arg(&temp.join("runtime-root")),
+    ];
+
+    let output = run_bwu_without_home(&args, &rbw_root);
+
+    assert_eq!(output.status.code(), Some(2));
+    for expected in [
+        temp.join("config-root").join("bwu"),
+        temp.join("cache-root").join("bwu"),
+        temp.join("data-root").join("bwu"),
+        temp.join("runtime-root").join("bwu"),
+    ] {
+        assert!(
+            expected.is_dir(),
+            "command should create bwu temp root directory: {}",
+            expected.display()
+        );
+    }
+    assert!(
+        !rbw_root.exists(),
+        "command must not read or create rbw state even when rbw env vars are present"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
+}
+
+#[test]
+fn every_planned_command_accepts_temp_root_overrides() {
+    let commands = [
+        ("account", "status"),
+        ("vault", "sync"),
+        ("item", "list"),
+        ("otp", "code"),
+        ("passkey", "get"),
+        ("agent", "status"),
+        ("config", "show"),
+    ];
+
+    for (group, operation) in commands {
+        let temp = temp_tree(&format!("{group}-{operation}"));
+        let rbw_root = temp.join("rbw");
+        let args = vec![
+            group.to_string(),
+            operation.to_string(),
+            "--config-root".to_string(),
+            path_arg(&temp.join("config-root")),
+            "--cache-root".to_string(),
+            path_arg(&temp.join("cache-root")),
+            "--data-root".to_string(),
+            path_arg(&temp.join("data-root")),
+            "--runtime-root".to_string(),
+            path_arg(&temp.join("runtime-root")),
+        ];
+
+        let output = run_bwu_without_home(&args, &rbw_root);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{group} {operation} should accept temp root overrides"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+        assert!(
+            stderr.contains("not implemented"),
+            "{group} {operation} should reach the planned command path:\n{stderr}"
+        );
+        assert!(
+            !rbw_root.exists(),
+            "{group} {operation} must not create rbw state"
+        );
+
+        fs::remove_dir_all(temp).expect("test temp tree should be removable");
     }
 }
