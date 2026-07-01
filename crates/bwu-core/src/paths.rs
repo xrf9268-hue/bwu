@@ -328,6 +328,8 @@ const OWNER_ONLY_DIR_MODE: u32 = 0o700;
 trait DirOps {
     fn path_is_dir(&self, path: &Path) -> bool;
     fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
+    fn owner_id(&self, path: &Path) -> io::Result<u32>;
+    fn effective_owner_id(&self) -> io::Result<u32>;
     fn permissions_mode(&self, path: &Path) -> io::Result<u32>;
     fn set_permissions_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
 }
@@ -346,6 +348,16 @@ impl DirOps for RealDirOps {
 
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true).mode(mode).create(path)
+    }
+
+    fn owner_id(&self, path: &Path) -> io::Result<u32> {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(fs::metadata(path)?.uid())
+    }
+
+    fn effective_owner_id(&self) -> io::Result<u32> {
+        Ok(rustix::process::geteuid().as_raw())
     }
 
     fn permissions_mode(&self, path: &Path) -> io::Result<u32> {
@@ -380,6 +392,27 @@ fn ensure_owner_only_dir_with_ops(path: &Path, ops: &impl DirOps) -> Result<(), 
         path: path.to_path_buf(),
         source,
     })?;
+
+    let owner_id = ops.owner_id(path).map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let effective_owner_id = ops.effective_owner_id().map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if owner_id != effective_owner_id {
+        return Err(PathError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "bwu directory owner uid {owner_id} does not match current effective uid {effective_owner_id}"
+                ),
+            ),
+        });
+    }
+
     if mode == OWNER_ONLY_DIR_MODE {
         return Ok(());
     }
@@ -429,6 +462,8 @@ mod tests {
     struct FakeDirOps {
         existed: bool,
         mode: Cell<u32>,
+        owner_id: Cell<u32>,
+        effective_owner_id: Cell<u32>,
         create_modes: RefCell<Vec<u32>>,
         chmod_calls: Cell<usize>,
         chmod_error: bool,
@@ -439,6 +474,8 @@ mod tests {
             Self {
                 existed: false,
                 mode: Cell::new(mode),
+                owner_id: Cell::new(1000),
+                effective_owner_id: Cell::new(1000),
                 create_modes: RefCell::new(Vec::new()),
                 chmod_calls: Cell::new(0),
                 chmod_error: false,
@@ -449,6 +486,8 @@ mod tests {
             Self {
                 existed: true,
                 mode: Cell::new(mode),
+                owner_id: Cell::new(1000),
+                effective_owner_id: Cell::new(1000),
                 create_modes: RefCell::new(Vec::new()),
                 chmod_calls: Cell::new(0),
                 chmod_error: false,
@@ -457,6 +496,16 @@ mod tests {
 
         fn with_chmod_error(mut self) -> Self {
             self.chmod_error = true;
+            self
+        }
+
+        fn with_owner_id(self, owner_id: u32) -> Self {
+            self.owner_id.set(owner_id);
+            self
+        }
+
+        fn with_effective_owner_id(self, effective_owner_id: u32) -> Self {
+            self.effective_owner_id.set(effective_owner_id);
             self
         }
     }
@@ -469,6 +518,14 @@ mod tests {
         fn create_dir_all_with_mode(&self, _path: &Path, mode: u32) -> io::Result<()> {
             self.create_modes.borrow_mut().push(mode);
             Ok(())
+        }
+
+        fn owner_id(&self, _path: &Path) -> io::Result<u32> {
+            Ok(self.owner_id.get())
+        }
+
+        fn effective_owner_id(&self) -> io::Result<u32> {
+            Ok(self.effective_owner_id.get())
         }
 
         fn permissions_mode(&self, _path: &Path) -> io::Result<u32> {
@@ -515,6 +572,23 @@ mod tests {
             ops.chmod_calls.get(),
             1,
             "existing broad directories should be narrowed exactly once"
+        );
+    }
+
+    #[test]
+    fn existing_unix_dirs_fail_closed_when_owner_differs_from_effective_user() {
+        let ops = FakeDirOps::existing_with_mode(0o700)
+            .with_owner_id(2000)
+            .with_effective_owner_id(1000);
+
+        let err = ensure_owner_only_dir_with_ops(Path::new("/synthetic/bwu"), &ops)
+            .expect_err("existing private directory owned by another uid should fail");
+
+        assert!(matches!(err, PathError::Io { .. }));
+        assert_eq!(
+            ops.chmod_calls.get(),
+            0,
+            "mode changes cannot fix a directory owned by another user"
         );
     }
 }
