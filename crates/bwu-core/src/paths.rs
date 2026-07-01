@@ -321,25 +321,200 @@ fn home_root(kind: &'static str) -> Result<PathBuf, PathError> {
         .ok_or(PathError::MissingHome { kind })
 }
 
-fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
-    fs::create_dir_all(path).map_err(|source| PathError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    set_owner_only_permissions(path)
+#[cfg(unix)]
+const OWNER_ONLY_DIR_MODE: u32 = 0o700;
+
+#[cfg(unix)]
+trait DirOps {
+    fn path_is_dir(&self, path: &Path) -> bool;
+    fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
+    fn permissions_mode(&self, path: &Path) -> io::Result<u32>;
+    fn set_permissions_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
 }
 
 #[cfg(unix)]
-fn set_owner_only_permissions(path: &Path) -> Result<(), PathError> {
-    use std::os::unix::fs::PermissionsExt;
+struct RealDirOps;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| PathError::Io {
+#[cfg(unix)]
+impl DirOps for RealDirOps {
+    fn path_is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
+    fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(mode).create(path)
+    }
+
+    fn permissions_mode(&self, path: &Path) -> io::Result<u32> {
+        use std::os::unix::fs::PermissionsExt;
+
+        Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+    }
+
+    fn set_permissions_mode(&self, path: &Path, mode: u32) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+}
+
+#[cfg(unix)]
+fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
+    let ops = RealDirOps;
+    ensure_owner_only_dir_with_ops(path, &ops)
+}
+
+#[cfg(unix)]
+fn ensure_owner_only_dir_with_ops(path: &Path, ops: &impl DirOps) -> Result<(), PathError> {
+    let existed = ops.path_is_dir(path);
+    ops.create_dir_all_with_mode(path, OWNER_ONLY_DIR_MODE)
+        .map_err(|source| PathError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let mode = ops.permissions_mode(path).map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if mode == OWNER_ONLY_DIR_MODE {
+        return Ok(());
+    }
+
+    ops.set_permissions_mode(path, OWNER_ONLY_DIR_MODE)
+        .map_err(|source| PathError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let mode = ops.permissions_mode(path).map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if mode == OWNER_ONLY_DIR_MODE {
+        return Ok(());
+    }
+
+    let creation_context = if existed { "existing" } else { "newly created" };
+    Err(PathError::Io {
+        path: path.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{creation_context} bwu directory is not owner-only after chmod: mode {mode:o}"
+            ),
+        ),
+    })
+}
+
+#[cfg(not(unix))]
+fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
+    fs::create_dir_all(path).map_err(|source| PathError::Io {
         path: path.to_path_buf(),
         source,
     })
 }
 
-#[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &Path) -> Result<(), PathError> {
-    Ok(())
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        io,
+    };
+
+    struct FakeDirOps {
+        existed: bool,
+        mode: Cell<u32>,
+        create_modes: RefCell<Vec<u32>>,
+        chmod_calls: Cell<usize>,
+        chmod_error: bool,
+    }
+
+    impl FakeDirOps {
+        fn missing_created_with_mode(mode: u32) -> Self {
+            Self {
+                existed: false,
+                mode: Cell::new(mode),
+                create_modes: RefCell::new(Vec::new()),
+                chmod_calls: Cell::new(0),
+                chmod_error: false,
+            }
+        }
+
+        fn existing_with_mode(mode: u32) -> Self {
+            Self {
+                existed: true,
+                mode: Cell::new(mode),
+                create_modes: RefCell::new(Vec::new()),
+                chmod_calls: Cell::new(0),
+                chmod_error: false,
+            }
+        }
+
+        fn with_chmod_error(mut self) -> Self {
+            self.chmod_error = true;
+            self
+        }
+    }
+
+    impl DirOps for FakeDirOps {
+        fn path_is_dir(&self, _path: &Path) -> bool {
+            self.existed
+        }
+
+        fn create_dir_all_with_mode(&self, _path: &Path, mode: u32) -> io::Result<()> {
+            self.create_modes.borrow_mut().push(mode);
+            Ok(())
+        }
+
+        fn permissions_mode(&self, _path: &Path) -> io::Result<u32> {
+            Ok(self.mode.get())
+        }
+
+        fn set_permissions_mode(&self, _path: &Path, mode: u32) -> io::Result<()> {
+            self.chmod_calls.set(self.chmod_calls.get() + 1);
+            if self.chmod_error {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "synthetic chmod failure",
+                ));
+            }
+            self.mode.set(mode);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn newly_created_unix_dirs_are_created_owner_only_without_post_creation_chmod() {
+        let ops = FakeDirOps::missing_created_with_mode(0o700);
+
+        ensure_owner_only_dir_with_ops(Path::new("/synthetic/bwu"), &ops)
+            .expect("new directory should be private at creation time");
+
+        assert_eq!(ops.create_modes.borrow().as_slice(), &[0o700]);
+        assert_eq!(
+            ops.chmod_calls.get(),
+            0,
+            "new private directories must not rely on a later chmod"
+        );
+    }
+
+    #[test]
+    fn existing_unix_dirs_fail_closed_when_owner_only_chmod_fails() {
+        let ops = FakeDirOps::existing_with_mode(0o755).with_chmod_error();
+
+        let err = ensure_owner_only_dir_with_ops(Path::new("/synthetic/bwu"), &ops)
+            .expect_err("existing broad directory should fail if chmod fails");
+
+        assert!(matches!(err, PathError::Io { .. }));
+        assert_eq!(
+            ops.chmod_calls.get(),
+            1,
+            "existing broad directories should be narrowed exactly once"
+        );
+    }
 }
