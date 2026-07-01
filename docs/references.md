@@ -67,6 +67,10 @@ before implementing it.
   guidance.
 - [GitHub Actions workflow artifacts](https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts) -
   artifact upload and retention behavior.
+- [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/) -
+  user-specific config, cache, data, and runtime directory environment
+  variables, including absolute-path requirements and runtime directory
+  permissions.
 - [Cargo Book: Continuous Integration](https://doc.rust-lang.org/cargo/guide/continuous-integration.html) -
   Rust CI baseline.
 - [Cargo Book: Profiles](https://doc.rust-lang.org/cargo/reference/profiles.html) -
