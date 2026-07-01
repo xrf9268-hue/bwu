@@ -12,6 +12,25 @@ fn secret_string_has_zeroizing_drop_contract() {
 }
 
 #[test]
+fn device_model_constructs_and_redacts_identifier() {
+    let device = Device::new(25, "Linux CLI", "synthetic-device-id");
+    let rendered = format!("{device:?}");
+
+    assert!(
+        rendered.contains("Linux CLI"),
+        "Device debug should retain non-secret device name for diagnostics: {rendered}"
+    );
+    assert!(
+        !rendered.contains("synthetic-device-id"),
+        "Device debug leaked the device identifier: {rendered}"
+    );
+    assert!(
+        rendered.contains("<redacted>"),
+        "Device debug should make identifier redaction visible: {rendered}"
+    );
+}
+
+#[test]
 fn endpoint_model_builds_us_eu_and_self_hosted_urls() {
     let us = EndpointConfig::official_us();
     assert_eq!(us.web_vault_url().as_str(), "https://vault.bitwarden.com/");
