@@ -95,13 +95,14 @@ return `enabled`.
 ## Repository protection
 
 Active protection for `main`, verified through repository ruleset
-`Protect main with governance checks` on 2026-06-30:
+`Protect main with governance checks` on 2026-07-01:
 
 - Applies to the default branch only.
 - Enforcement is active.
 - Blocks branch deletion and non-fast-forward updates.
 - Requires pull requests before merge.
-- Requires one approving review and dismisses stale reviews on new pushes.
+- Does not require an approving review while the repository has only a small
+  maintainer/collaborator pool; manual review remains expected by process.
 - Requires all review threads to be resolved.
 - Requires the `Docs baseline` status check with strict up-to-date policy.
 - Has no bypass actors, and the current admin user cannot bypass the ruleset.
