@@ -1,0 +1,12 @@
+[package]
+name = "bwu-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+description = "Shared command metadata, namespace constants, and skeleton errors for bwu."
+
+[lints]
+workspace = true

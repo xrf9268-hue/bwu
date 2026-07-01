@@ -14,6 +14,8 @@
 - Minimum Rust version: 1.95 unless an ADR changes it.
 - CI must run formatting, clippy, tests, docs, and dependency advisory checks
   before feature work is considered merge-ready.
+- The Rust workflow performs dependency advisory checks with `cargo audit`,
+  backed by the RustSec Advisory Database.
 - `unsafe` is forbidden by default. Any proposed `unsafe` requires a dedicated
   ADR, tests, and a security review.
 - Use typed wrappers for secrets so redaction and zeroization are hard to skip.
