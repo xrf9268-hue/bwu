@@ -10,8 +10,9 @@ security model instead of growing organically around convenience.
 
 ## Current status
 
-Planning baseline only. Do not treat this repository as a usable password
-manager until the milestone issues are implemented and verified.
+M1 Rust workspace and binary skeleton. Do not treat this repository as a
+usable password manager until the later vault, crypto, agent, and passkey
+milestone issues are implemented and verified.
 
 ## License
 

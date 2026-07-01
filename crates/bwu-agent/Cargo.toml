@@ -1,0 +1,19 @@
+[package]
+name = "bwu-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+description = "Optional local Unix socket agent skeleton for bwu."
+
+[dependencies]
+bwu-core = { path = "../bwu-core" }
+
+[[bin]]
+name = "bwu-agent"
+path = "src/main.rs"
+
+[lints]
+workspace = true
