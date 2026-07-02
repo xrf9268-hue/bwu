@@ -178,7 +178,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        CryptoError, KdfConfig, XCHACHA20_POLY1305, extract_xchacha20_poly1305_key_material,
+        CryptoError, DecryptedContentFormat, KdfConfig, XCHACHA20_POLY1305,
+        cose_decrypted_payload_bytes, extract_xchacha20_poly1305_key_material,
     };
 
     #[test]
@@ -233,6 +234,27 @@ mod tests {
         assert_zeroizing(&key);
         assert_eq!(&*key, raw_key.as_slice());
         assert_eq!(parsed_key_id, key_id);
+    }
+
+    #[test]
+    fn padded_cose_plaintext_is_zeroizing_before_unpadding() {
+        let secret = b"synthetic padded COSE plaintext";
+        let mut padded = secret.to_vec();
+        let padding = 32 - (padded.len() % 32);
+        padded.extend(std::iter::repeat_n(
+            u8::try_from(padding).expect("padding should fit in one byte"),
+            padding,
+        ));
+
+        let bytes = cose_decrypted_payload_bytes(
+            DecryptedContentFormat::PaddedUtf8,
+            Zeroizing::new(padded),
+        )
+        .expect("padded COSE plaintext should unpad");
+
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+        assert_zeroizing(&bytes);
+        assert_eq!(&*bytes, secret);
     }
 }
 
@@ -868,7 +890,7 @@ fn decrypt_cose_encrypt0_bytes(
         .map_err(|_| CryptoError::InvalidKeyLength)?;
 
     let content_format = cose_protected_content_format(&message)?;
-    let plaintext = message.decrypt_ciphertext(
+    let plaintext = Zeroizing::new(message.decrypt_ciphertext(
         &[],
         || CryptoError::InvalidEncryptedString,
         |ciphertext, aad| {
@@ -878,21 +900,27 @@ fn decrypt_cose_encrypt0_bytes(
                 .map_err(|_| CryptoError::AuthenticationFailed)?;
             Ok(buffer)
         },
-    )?;
+    )?);
 
-    let bytes = if content_format == DecryptedContentFormat::PaddedUtf8 {
-        Zeroizing::new(
-            unpad_bitwarden_bytes(&plaintext)
-                .map_err(|_| CryptoError::DecryptionFailed)?
-                .to_vec(),
-        )
-    } else {
-        Zeroizing::new(plaintext)
-    };
+    let bytes = cose_decrypted_payload_bytes(content_format, plaintext)?;
     Ok(DecryptedPayload {
         bytes,
         content_format,
     })
+}
+
+fn cose_decrypted_payload_bytes(
+    content_format: DecryptedContentFormat,
+    plaintext: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if content_format == DecryptedContentFormat::PaddedUtf8 {
+        return Ok(Zeroizing::new(
+            unpad_bitwarden_bytes(&plaintext)
+                .map_err(|_| CryptoError::DecryptionFailed)?
+                .to_vec(),
+        ));
+    }
+    Ok(plaintext)
 }
 
 fn cose_protected_content_format(
