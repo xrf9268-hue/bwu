@@ -823,18 +823,11 @@ fn decrypt_cose_encrypt0_bytes(
 }
 
 fn cose_content_type_is_padded_utf8(message: &CoseEncrypt0) -> Result<bool, CryptoError> {
-    let content_type = message
-        .protected
-        .header
-        .content_type
-        .as_ref()
-        .or(message.unprotected.content_type.as_ref());
-
-    match content_type {
+    match message.protected.header.content_type.as_ref() {
         Some(RegisteredLabel::Text(value)) if value == BITWARDEN_PADDED_UTF8_CONTENT_TYPE => {
             Ok(true)
         }
-        None => Ok(false),
+        None => Err(CryptoError::InvalidEncryptedString),
         Some(_) => Err(CryptoError::UnsupportedEncryptionType),
     }
 }

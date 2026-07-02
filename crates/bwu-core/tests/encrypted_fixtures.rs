@@ -35,6 +35,13 @@ const LEGACY_RSA_ORG_KEY_MAC: &[u8] = b"synthetic-legacy-org-key-mac";
 type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 
+#[derive(Clone, Copy)]
+enum CoseContentTypePlacement {
+    Protected,
+    Missing,
+    UnprotectedOnly,
+}
+
 fn encrypted_fixture_keys() -> VaultKeys {
     let password = SecretString::new("synthetic-master-password");
     let master = derive_master_key(
@@ -104,6 +111,22 @@ fn encrypt_cose_fixture(
     key_id: &[u8],
     nonce: &[u8; 24],
 ) -> String {
+    encrypt_cose_fixture_with_content_type(
+        plaintext,
+        key,
+        key_id,
+        nonce,
+        CoseContentTypePlacement::Protected,
+    )
+}
+
+fn encrypt_cose_fixture_with_content_type(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    key_id: &[u8],
+    nonce: &[u8; 24],
+    content_type_placement: CoseContentTypePlacement,
+) -> String {
     let mut padded_plaintext = plaintext.to_vec();
     let padding = 32 - (padded_plaintext.len() % 32);
     padded_plaintext.extend(std::iter::repeat_n(
@@ -111,14 +134,23 @@ fn encrypt_cose_fixture(
         padding,
     ));
 
+    let mut protected = HeaderBuilder::new()
+        .algorithm_label(Algorithm::PrivateUse(-70_000))
+        .key_id(key_id.to_vec());
+    if matches!(content_type_placement, CoseContentTypePlacement::Protected) {
+        protected = protected.content_type("application/x.bitwarden.utf8-padded".to_owned());
+    }
+
+    let mut unprotected = HeaderBuilder::new().iv(nonce.to_vec());
+    if matches!(
+        content_type_placement,
+        CoseContentTypePlacement::UnprotectedOnly
+    ) {
+        unprotected = unprotected.content_type("application/x.bitwarden.utf8-padded".to_owned());
+    }
+
     let message = CoseEncrypt0Builder::new()
-        .protected(
-            HeaderBuilder::new()
-                .algorithm_label(Algorithm::PrivateUse(-70_000))
-                .key_id(key_id.to_vec())
-                .content_type("application/x.bitwarden.utf8-padded".to_owned())
-                .build(),
-        )
+        .protected(protected.build())
         .create_ciphertext(&padded_plaintext, &[], |data, aad| {
             let mut buffer = data.to_vec();
             XChaCha20Poly1305::new(key.into())
@@ -126,7 +158,7 @@ fn encrypt_cose_fixture(
                 .expect("synthetic COSE fixture should encrypt");
             buffer
         })
-        .unprotected(HeaderBuilder::new().iv(nonce.to_vec()).build())
+        .unprotected(unprotected.build())
         .build();
 
     format!(
@@ -566,6 +598,56 @@ fn encrypted_fixtures_decrypt_current_cose_field_without_secret_leaks() {
             !rendered.contains(secret),
             "COSE fixture output leaked synthetic secret material"
         );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_reject_malformed_cose_content_type_headers_without_secret_leaks() {
+    let key_bytes = synthetic_xchacha_key_bytes();
+    let key_id = b"synthetic-cose-key-id";
+    let keys = VaultKeys {
+        account_key: synthetic_cose_key(),
+        organization_keys: BTreeMap::new(),
+    };
+
+    let missing_protected_content_type = encrypt_cose_fixture_with_content_type(
+        b"synthetic malformed COSE note",
+        &key_bytes,
+        key_id,
+        b"cose-missing-type-nonce!",
+        CoseContentTypePlacement::Missing,
+    );
+    let unprotected_only_content_type = encrypt_cose_fixture_with_content_type(
+        b"synthetic unprotected COSE note",
+        &key_bytes,
+        key_id,
+        b"cose-unprotected-type!!!",
+        CoseContentTypePlacement::UnprotectedOnly,
+    );
+
+    for malformed in [
+        missing_protected_content_type.as_str(),
+        unprotected_only_content_type.as_str(),
+    ] {
+        let err = decrypt_vault_item(
+            &cose_item(vec![encrypted_field("secure_note.notes", malformed)]),
+            &keys,
+        )
+        .expect_err("malformed COSE content type headers should fail closed");
+        assert_eq!(err, CryptoError::InvalidEncryptedString);
+
+        let rendered = format!("{err:?} {err}");
+        for secret in [
+            "synthetic malformed COSE note",
+            "synthetic unprotected COSE note",
+            "synthetic-cose-key-id",
+            malformed,
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "malformed COSE fixture output leaked synthetic secret material"
+            );
+        }
     }
 }
 
