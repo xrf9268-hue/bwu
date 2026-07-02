@@ -400,6 +400,66 @@ fn password_token_exchange_preserves_two_factor_challenge_error_and_redacts_mate
 }
 
 #[test]
+fn password_token_exchange_preserves_null_two_factor_provider_entries() {
+    let mut server = Server::new();
+    let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
+    let _token_mock = server
+        .mock("POST", "/identity/connect/token")
+        .with_status(400)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "TwoFactorProviders":["0","8"],
+                "TwoFactorProviders2":{"0":null,"8":null},
+                "MasterPasswordPolicy":null,
+                "error":"invalid_grant",
+                "error_description":"Two factor required."
+            }"#,
+        )
+        .create();
+
+    let error = ApiClient::new(endpoint)
+        .exchange_password_token(&PasswordTokenRequest::new(
+            "user@example.test",
+            "synthetic-master-hash",
+            "synthetic-client-id",
+            Device::new(25, "Linux CLI", "synthetic-device-id"),
+        ))
+        .expect_err("null provider challenge data should still produce a typed two-factor error");
+
+    let ApiClientError::TwoFactorRequired { challenge, .. } = &error else {
+        panic!("expected two-factor challenge error, got {error:?}");
+    };
+
+    assert_eq!(
+        challenge.providers(),
+        &[
+            TwoFactorProvider::Authenticator,
+            TwoFactorProvider::RecoveryCode
+        ]
+    );
+    assert!(
+        challenge
+            .provider_data(TwoFactorProvider::Authenticator)
+            .is_some(),
+        "Authenticator provider presence should survive null provider data"
+    );
+    assert!(
+        challenge
+            .provider_data(TwoFactorProvider::RecoveryCode)
+            .is_some(),
+        "Recovery code provider presence should survive null provider data"
+    );
+    let rendered = format!("{error:?}\n{error}");
+    for secret in ["synthetic-master-hash", "synthetic-device-id"] {
+        assert!(
+            !rendered.contains(secret),
+            "two-factor challenge error leaked secret {secret:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn token_response_debug_redacts_nested_user_decryption_options() {
     let response: TokenResponse = serde_json::from_str(
         r#"{

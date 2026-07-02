@@ -470,6 +470,12 @@ pub struct TwoFactorProviderChallenge {
 }
 
 impl TwoFactorProviderChallenge {
+    fn empty() -> Self {
+        Self {
+            fields: BTreeMap::new(),
+        }
+    }
+
     /// Reads a provider-specific challenge field.
     #[must_use]
     pub fn get(&self, field: &str) -> Option<&Value> {
@@ -528,13 +534,18 @@ fn deserialize_provider_data<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    BTreeMap::<String, TwoFactorProviderChallenge>::deserialize(deserializer)?
+    BTreeMap::<String, Option<TwoFactorProviderChallenge>>::deserialize(deserializer)?
         .into_iter()
         .map(|(provider, data)| {
             provider
                 .parse::<u8>()
                 .map(TwoFactorProvider::from_protocol_id)
-                .map(|provider| (provider, data))
+                .map(|provider| {
+                    (
+                        provider,
+                        data.unwrap_or_else(TwoFactorProviderChallenge::empty),
+                    )
+                })
                 .map_err(|source| {
                     de::Error::custom(format!("invalid two-factor provider id: {source}"))
                 })
