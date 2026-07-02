@@ -25,6 +25,16 @@ fn path_arg(path: &Path) -> String {
         .to_string()
 }
 
+fn run_agent_without_home(args: &[String], rbw_root: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_bwu-agent"))
+        .args(args)
+        .env_remove("HOME")
+        .env_remove("XDG_RUNTIME_DIR")
+        .env("RBW_RUNTIME_DIR", rbw_root.join("runtime"))
+        .output()
+        .expect("bwu-agent binary should run")
+}
+
 #[test]
 fn agent_help_lists_planned_local_socket_commands() {
     let output = run_agent(&["--help"]);
@@ -48,7 +58,15 @@ fn agent_help_lists_planned_local_socket_commands() {
 
 #[test]
 fn agent_start_fails_with_explicit_not_implemented_error() {
-    let output = run_agent(&["start"]);
+    let temp = temp_tree("start-not-implemented");
+    let rbw_root = temp.join("rbw");
+    let args = vec![
+        "start".to_string(),
+        "--runtime-root".to_string(),
+        path_arg(&temp.join("runtime-root")),
+    ];
+
+    let output = run_agent_without_home(&args, &rbw_root);
 
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
@@ -61,6 +79,16 @@ fn agent_start_fails_with_explicit_not_implemented_error() {
         stderr.contains("Unix socket agent"),
         "agent error should preserve the local-socket boundary:\n{stderr}"
     );
+    assert!(
+        temp.join("runtime-root").join("bwu").is_dir(),
+        "agent start test should create only its explicit temp runtime directory"
+    );
+    assert!(
+        !rbw_root.exists(),
+        "agent start test must not create rbw runtime state"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
 }
 
 #[test]

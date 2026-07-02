@@ -25,6 +25,19 @@ fn path_arg(path: &Path) -> String {
         .to_string()
 }
 
+fn temp_root_args(temp: &Path) -> Vec<String> {
+    vec![
+        "--config-root".to_string(),
+        path_arg(&temp.join("config-root")),
+        "--cache-root".to_string(),
+        path_arg(&temp.join("cache-root")),
+        "--data-root".to_string(),
+        path_arg(&temp.join("data-root")),
+        "--runtime-root".to_string(),
+        path_arg(&temp.join("runtime-root")),
+    ]
+}
+
 fn run_bwu_without_home(args: &[String], rbw_root: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bwu"))
         .args(args)
@@ -62,7 +75,12 @@ fn bwu_help_lists_planned_command_groups() {
 
 #[test]
 fn bwu_real_operations_fail_with_explicit_not_implemented_error() {
-    let output = run_bwu(&["item", "list"]);
+    let temp = temp_tree("item-list-not-implemented");
+    let rbw_root = temp.join("rbw");
+    let mut args = vec!["item".to_string(), "list".to_string()];
+    args.extend(temp_root_args(&temp));
+
+    let output = run_bwu_without_home(&args, &rbw_root);
 
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
@@ -75,18 +93,29 @@ fn bwu_real_operations_fail_with_explicit_not_implemented_error() {
         stderr.contains("no network, crypto, or vault cache implementation"),
         "error should document the M1 boundary:\n{stderr}"
     );
+    assert!(
+        !rbw_root.exists(),
+        "real operation test must not create rbw state"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
 }
 
 #[test]
 fn bwu_not_implemented_errors_do_not_echo_secret_arguments() {
-    let output = run_bwu(&[
-        "account",
-        "login",
-        "--password",
-        "test-master-password",
-        "--client-secret",
-        "test-api-secret",
-    ]);
+    let temp = temp_tree("account-login-redaction");
+    let rbw_root = temp.join("rbw");
+    let mut args = vec![
+        "account".to_string(),
+        "login".to_string(),
+        "--password".to_string(),
+        "test-master-password".to_string(),
+        "--client-secret".to_string(),
+        "test-api-secret".to_string(),
+    ];
+    args.extend(temp_root_args(&temp));
+
+    let output = run_bwu_without_home(&args, &rbw_root);
 
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
@@ -101,6 +130,12 @@ fn bwu_not_implemented_errors_do_not_echo_secret_arguments() {
             "not-implemented error leaked secret argument {leaked:?}:\n{stderr}"
         );
     }
+    assert!(
+        !rbw_root.exists(),
+        "redaction test must not create rbw state"
+    );
+
+    fs::remove_dir_all(temp).expect("test temp tree should be removable");
 }
 
 #[test]
