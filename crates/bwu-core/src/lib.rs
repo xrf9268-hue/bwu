@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
-//! Shared M1 skeleton primitives for the `bwu` workspace.
+//! Shared primitives for the `bwu` workspace.
 //!
-//! This crate intentionally contains no Bitwarden network client, cryptography,
-//! persistent vault cache, or passkey implementation.
+//! This crate contains command metadata, redaction/path helpers, and the
+//! isolated Bitwarden-compatible crypto core. It intentionally does not contain
+//! a Bitwarden network client, persistent vault cache, or passkey signing.
 
 pub mod command;
+pub mod crypto;
 pub mod error;
 pub mod namespace;
 pub mod paths;
