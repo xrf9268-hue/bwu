@@ -18,7 +18,7 @@ use openssl::{
     md::Md,
     pkey::{PKey, Private},
     pkey_ctx::PkeyCtx,
-    rsa::{Padding, Rsa},
+    rsa::Padding,
 };
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
@@ -317,21 +317,17 @@ impl fmt::Debug for RsaEncryptedString {
 
 /// Zeroizing RSA private-key material decrypted from the account key.
 pub struct RsaPrivateKeyMaterial {
-    pkcs8_pem: Zeroizing<String>,
+    key: Zeroizing<Vec<u8>>,
 }
 
 impl RsaPrivateKeyMaterial {
-    fn from_pkcs8_pem(pkcs8_pem: impl Into<String>) -> Result<Self, CryptoError> {
-        let pkcs8_pem = Zeroizing::new(pkcs8_pem.into());
-        Rsa::private_key_from_pem(pkcs8_pem.as_bytes())
-            .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Self { pkcs8_pem })
+    fn from_decrypted_bytes(key: Zeroizing<Vec<u8>>) -> Result<Self, CryptoError> {
+        parse_private_key_bytes(&key)?;
+        Ok(Self { key })
     }
 
     fn parse(&self) -> Result<PKey<Private>, CryptoError> {
-        let rsa = Rsa::private_key_from_pem(self.pkcs8_pem.as_bytes())
-            .map_err(|_| CryptoError::InvalidPrivateKey)?;
-        PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidPrivateKey)
+        parse_private_key_bytes(&self.key)
     }
 }
 
@@ -481,8 +477,7 @@ pub fn decrypt_private_key(
     account_key: &SymmetricKey,
 ) -> Result<RsaPrivateKeyMaterial, CryptoError> {
     let plaintext = decrypt_bytes(encrypted_private_key, account_key)?;
-    let pkcs8_pem = std::str::from_utf8(&plaintext).map_err(|_| CryptoError::InvalidUtf8)?;
-    RsaPrivateKeyMaterial::from_pkcs8_pem(pkcs8_pem)
+    RsaPrivateKeyMaterial::from_decrypted_bytes(plaintext)
 }
 
 /// Decrypts an organization key using the user's decrypted RSA private key.
@@ -578,6 +573,16 @@ fn decrypt_symmetric_key(
 ) -> Result<SymmetricKey, CryptoError> {
     let plaintext = decrypt_bytes(encrypted_key, wrapping_key)?;
     SymmetricKey::new(plaintext.to_vec())
+}
+
+fn parse_private_key_bytes(key: &[u8]) -> Result<PKey<Private>, CryptoError> {
+    let private_key = PKey::private_key_from_der(key)
+        .or_else(|_| PKey::private_key_from_pem(key))
+        .map_err(|_| CryptoError::InvalidPrivateKey)?;
+    let rsa = private_key
+        .rsa()
+        .map_err(|_| CryptoError::InvalidPrivateKey)?;
+    PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidPrivateKey)
 }
 
 fn decrypt_bytes(

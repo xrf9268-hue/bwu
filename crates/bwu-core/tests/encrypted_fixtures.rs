@@ -80,7 +80,7 @@ fn encrypt_symmetric_fixture(
     )
 }
 
-fn rsa_organization_key_fixture() -> (String, String) {
+fn rsa_organization_key_fixture() -> (String, Vec<u8>, String) {
     let rsa = Rsa::generate(2048).expect("synthetic RSA key should generate");
     let pkey = PKey::from_rsa(rsa).expect("synthetic RSA key should convert");
     let private_pem = String::from_utf8(
@@ -88,6 +88,9 @@ fn rsa_organization_key_fixture() -> (String, String) {
             .expect("synthetic RSA key should encode"),
     )
     .expect("synthetic RSA key PEM should be UTF-8");
+    let private_der = pkey
+        .private_key_to_pkcs8()
+        .expect("synthetic RSA key should encode as PKCS#8 DER");
 
     let mut context = PkeyCtx::new(&pkey).expect("synthetic RSA context should create");
     context
@@ -110,6 +113,7 @@ fn rsa_organization_key_fixture() -> (String, String) {
 
     (
         private_pem,
+        private_der,
         format!("3.{}", STANDARD.encode(encrypted_org_key)),
     )
 }
@@ -152,7 +156,7 @@ fn assert_field(item: &bwu_core::crypto::DecryptedVaultItem, name: &str, expecte
 #[test]
 fn encrypted_fixtures_unwrap_organization_key_with_decrypted_rsa_private_key() {
     let keys = encrypted_fixture_keys();
-    let (private_pem, encrypted_org_key) = rsa_organization_key_fixture();
+    let (private_pem, _private_der, encrypted_org_key) = rsa_organization_key_fixture();
     let encrypted_private_key = encrypt_symmetric_fixture(
         private_pem.as_bytes(),
         &keys.account_key,
@@ -183,6 +187,41 @@ fn encrypted_fixtures_unwrap_organization_key_with_decrypted_rsa_private_key() {
         assert!(
             !rendered.contains(secret),
             "RSA organization-key fixture output leaked secret material"
+        );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_unwrap_organization_key_with_der_private_key_bytes() {
+    let keys = encrypted_fixture_keys();
+    let (_private_pem, private_der, encrypted_org_key) = rsa_organization_key_fixture();
+    let encrypted_private_key =
+        encrypt_symmetric_fixture(&private_der, &keys.account_key, b"rsa-der-key-iv!!");
+
+    let private_key = decrypt_private_key(
+        &EncryptedString::parse(&encrypted_private_key)
+            .expect("encrypted DER private key fixture should parse"),
+        &keys.account_key,
+    )
+    .expect("DER private key bytes should decrypt");
+    let org_key = decrypt_organization_key(
+        &RsaEncryptedString::parse(&encrypted_org_key)
+            .expect("RSA organization key fixture should parse"),
+        &private_key,
+    )
+    .expect("organization key should unwrap through a DER private key");
+
+    assert_eq!(org_key, synthetic_org_key());
+
+    let rendered = format!("{private_key:?} {org_key:?}");
+    for secret in [
+        STANDARD.encode(&private_der[..24]),
+        "BEGIN PRIVATE KEY".to_owned(),
+        "505152535455565758595a5b5c5d5e5f".to_owned(),
+    ] {
+        assert!(
+            !rendered.contains(&secret),
+            "DER private-key fixture output leaked secret material"
         );
     }
 }
