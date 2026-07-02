@@ -15,6 +15,7 @@ base64 = "0.22.1"
 cbc = { version = "0.1.2", features = ["alloc"] }
 hkdf = "0.12.4"
 hmac = "0.12.1"
+openssl = "0.10.81"
 pbkdf2 = "0.12.2"
 rustix = { version = "1.1.4", features = ["process"] }
 sha2 = "0.10.9"

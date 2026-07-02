@@ -1,5 +1,5 @@
 use bwu_core::{
-    crypto::{EncryptedString, KdfConfig, derive_master_key},
+    crypto::{EncryptedString, KdfConfig, RsaEncryptedString, derive_master_key},
     redaction::SecretString,
 };
 
@@ -63,6 +63,22 @@ fn crypto_core_rejects_weak_or_unsupported_kdf_parameters() {
 }
 
 #[test]
+fn crypto_core_argon2id_normalizes_account_email_salt() {
+    let password = SecretString::new("synthetic-master-password");
+    let config = KdfConfig::argon2id(2, 16, 1);
+
+    let normalized = derive_master_key(&password, "user@example.com", config)
+        .expect("normalized Argon2id account salt should derive");
+    let noisy = derive_master_key(&password, " USER@example.com ", config)
+        .expect("case and whitespace variants should derive");
+
+    assert_eq!(
+        noisy, normalized,
+        "Argon2id account-email salts should be normalized consistently with PBKDF2"
+    );
+}
+
+#[test]
 fn crypto_core_encrypted_string_parser_rejects_malformed_inputs() {
     let valid = EncryptedString::parse(
         "2.YWNjb3VudC1rZXktaXYhIQ==|tgMg75OxorP0hiI5rt3T6bDyt0s9tcvtRQ2FxRGj7HPCjRRW598dqnq1EeWw7Cc+2hzuoLyWr4ZyW5fIKUMqLvsUwwWXa4BZg2aW4vrlfDI=|UeL8DxxJsZpeuTAkas560WEcuosQCwHL6Rk6PwUlzyU=",
@@ -89,5 +105,31 @@ fn crypto_core_encrypted_string_parser_rejects_malformed_inputs() {
                 "parse error output should not echo encrypted payloads"
             );
         }
+    }
+}
+
+#[test]
+fn crypto_core_rsa_encrypted_string_parser_accepts_official_rsa_oaep_shapes() {
+    let sha256 = RsaEncryptedString::parse("3.cnNhLW9hZXAtc2hhMjU2LWZpeHR1cmU=")
+        .expect("RSA-OAEP-SHA256 encrypted string should parse");
+    assert_eq!(sha256.encryption_type(), 3);
+
+    let sha1 = RsaEncryptedString::parse("4.cnNhLW9hZXAtc2hhMS1maXh0dXJl")
+        .expect("RSA-OAEP-SHA1 encrypted string should parse");
+    assert_eq!(sha1.encryption_type(), 4);
+
+    for malformed in [
+        "2.YWNjb3VudC1rZXktaXYhIQ==|ciphertext|mac",
+        "3.not-base64",
+        "3.cGF5bG9hZA==|unexpected-mac",
+        "7.cGF5bG9hZA==",
+    ] {
+        let err = RsaEncryptedString::parse(malformed)
+            .expect_err("malformed or unsupported RSA encrypted strings should fail closed");
+        let rendered = format!("{err:?} {err}");
+        assert!(
+            !rendered.contains(malformed),
+            "RSA parse error output should not echo encrypted payloads"
+        );
     }
 }

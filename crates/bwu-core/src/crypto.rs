@@ -14,6 +14,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use openssl::{
+    md::Md,
+    pkey::{PKey, Private},
+    pkey_ctx::PkeyCtx,
+    rsa::{Padding, Rsa},
+};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -24,6 +30,8 @@ type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 
 const AES_CBC_256_HMAC_SHA256: u8 = 2;
+const RSA_2048_OAEP_SHA256: u8 = 3;
+const RSA_2048_OAEP_SHA1: u8 = 4;
 const AES_KEY_LEN: usize = 32;
 const SYMMETRIC_HMAC_KEY_LEN: usize = 64;
 const AES_BLOCK_LEN: usize = 16;
@@ -54,6 +62,8 @@ pub enum CryptoError {
     DecryptionFailed,
     /// Decrypted field bytes were not valid UTF-8.
     InvalidUtf8,
+    /// Decrypted RSA private key material could not be parsed.
+    InvalidPrivateKey,
     /// An organization item referenced an organization key that is unavailable.
     MissingOrganizationKey,
     /// An encrypted vault item contained duplicate field names.
@@ -72,6 +82,7 @@ impl fmt::Display for CryptoError {
             Self::AuthenticationFailed => "encrypted string authentication failed",
             Self::DecryptionFailed => "encrypted string decryption failed",
             Self::InvalidUtf8 => "decrypted field is not valid UTF-8",
+            Self::InvalidPrivateKey => "invalid RSA private key",
             Self::MissingOrganizationKey => "missing organization key",
             Self::DuplicateFieldName => "duplicate encrypted field name",
         };
@@ -248,6 +259,91 @@ impl fmt::Debug for EncryptedString {
     }
 }
 
+/// Parsed Bitwarden RSA encrypted string.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RsaEncryptedString {
+    encryption_type: u8,
+    data: Vec<u8>,
+}
+
+impl RsaEncryptedString {
+    /// Parses a serialized Bitwarden RSA encrypted string.
+    ///
+    /// Organization keys are protected with the user's RSA public key in
+    /// single-payload RSA-OAEP encrypted strings.
+    pub fn parse(value: &str) -> Result<Self, CryptoError> {
+        let (prefix, payload) = value
+            .split_once('.')
+            .ok_or(CryptoError::InvalidEncryptedString)?;
+        let encryption_type = prefix
+            .parse::<u8>()
+            .map_err(|_| CryptoError::InvalidEncryptedString)?;
+        if !matches!(encryption_type, RSA_2048_OAEP_SHA256 | RSA_2048_OAEP_SHA1) {
+            return Err(CryptoError::UnsupportedEncryptionType);
+        }
+        if payload.contains('|') {
+            return Err(CryptoError::InvalidEncryptedString);
+        }
+
+        let data = STANDARD
+            .decode(payload)
+            .map_err(|_| CryptoError::InvalidBase64)?;
+        if data.is_empty() {
+            return Err(CryptoError::InvalidEncryptedString);
+        }
+
+        Ok(Self {
+            encryption_type,
+            data,
+        })
+    }
+
+    /// Returns the numeric Bitwarden encryption type.
+    #[must_use]
+    pub fn encryption_type(&self) -> u8 {
+        self.encryption_type
+    }
+}
+
+impl fmt::Debug for RsaEncryptedString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RsaEncryptedString")
+            .field("encryption_type", &self.encryption_type)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Zeroizing RSA private-key material decrypted from the account key.
+pub struct RsaPrivateKeyMaterial {
+    pkcs8_pem: Zeroizing<String>,
+}
+
+impl RsaPrivateKeyMaterial {
+    fn from_pkcs8_pem(pkcs8_pem: impl Into<String>) -> Result<Self, CryptoError> {
+        let pkcs8_pem = Zeroizing::new(pkcs8_pem.into());
+        Rsa::private_key_from_pem(pkcs8_pem.as_bytes())
+            .map_err(|_| CryptoError::InvalidPrivateKey)?;
+        Ok(Self { pkcs8_pem })
+    }
+
+    fn parse(&self) -> Result<PKey<Private>, CryptoError> {
+        let rsa = Rsa::private_key_from_pem(self.pkcs8_pem.as_bytes())
+            .map_err(|_| CryptoError::InvalidPrivateKey)?;
+        PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidPrivateKey)
+    }
+}
+
+impl fmt::Debug for RsaPrivateKeyMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("RsaPrivateKeyMaterial")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Item categories required by M3 read-only decryption tests.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum VaultItemType {
@@ -314,19 +410,18 @@ impl DecryptedVaultItem {
 
 /// Derives a Bitwarden master key from a master password and salt.
 ///
-/// PBKDF2 salts are account-email strings normalized the same way Bitwarden
-/// normalizes them before key derivation. Argon2id callers provide the server
-/// salt directly.
+/// KDF salts are account-email strings normalized the same way Bitwarden
+/// normalizes them before key derivation.
 pub fn derive_master_key(
     password: &SecretString,
     salt: &str,
     kdf: KdfConfig,
 ) -> Result<SymmetricKey, CryptoError> {
     kdf.validate()?;
+    let normalized_salt = salt.trim().to_lowercase();
     let mut output = Zeroizing::new([0_u8; AES_KEY_LEN]);
     match kdf {
         KdfConfig::Pbkdf2Sha256 { iterations } => {
-            let normalized_salt = salt.trim().to_lowercase();
             pbkdf2_hmac::<Sha256>(
                 password.expose_secret().as_bytes(),
                 normalized_salt.as_bytes(),
@@ -347,7 +442,7 @@ pub fn derive_master_key(
             Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
                 .hash_password_into(
                     password.expose_secret().as_bytes(),
-                    salt.as_bytes(),
+                    normalized_salt.as_bytes(),
                     &mut *output,
                 )
                 .map_err(|_| CryptoError::InvalidKdfParameters)?;
@@ -380,12 +475,51 @@ pub fn decrypt_account_key(
     decrypt_symmetric_key(protected_account_key, stretched_master_key)
 }
 
-/// Decrypts an organization key using an already-unlocked account key.
-pub fn decrypt_organization_key(
-    encrypted_organization_key: &EncryptedString,
+/// Decrypts a user's RSA private key using the already-unlocked account key.
+pub fn decrypt_private_key(
+    encrypted_private_key: &EncryptedString,
     account_key: &SymmetricKey,
+) -> Result<RsaPrivateKeyMaterial, CryptoError> {
+    let plaintext = decrypt_bytes(encrypted_private_key, account_key)?;
+    let pkcs8_pem = std::str::from_utf8(&plaintext).map_err(|_| CryptoError::InvalidUtf8)?;
+    RsaPrivateKeyMaterial::from_pkcs8_pem(pkcs8_pem)
+}
+
+/// Decrypts an organization key using the user's decrypted RSA private key.
+pub fn decrypt_organization_key(
+    encrypted_organization_key: &RsaEncryptedString,
+    private_key: &RsaPrivateKeyMaterial,
 ) -> Result<SymmetricKey, CryptoError> {
-    decrypt_symmetric_key(encrypted_organization_key, account_key)
+    let private_key = private_key.parse()?;
+    let digest = match encrypted_organization_key.encryption_type {
+        RSA_2048_OAEP_SHA256 => Md::sha256(),
+        RSA_2048_OAEP_SHA1 => Md::sha1(),
+        _ => return Err(CryptoError::UnsupportedEncryptionType),
+    };
+
+    let mut context = PkeyCtx::new(&private_key).map_err(|_| CryptoError::DecryptionFailed)?;
+    context
+        .decrypt_init()
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+    context
+        .set_rsa_padding(Padding::PKCS1_OAEP)
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+    context
+        .set_rsa_oaep_md(digest)
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+    context
+        .set_rsa_mgf1_md(digest)
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+
+    let mut plaintext = Zeroizing::new(Vec::new());
+    context
+        .decrypt_to_vec(
+            encrypted_organization_key.data.as_slice(),
+            plaintext.as_mut(),
+        )
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+
+    SymmetricKey::new(plaintext.to_vec())
 }
 
 /// Decrypts an item key using an account or organization wrapping key.

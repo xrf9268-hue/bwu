@@ -1,17 +1,31 @@
 use std::collections::BTreeMap;
 
+use aes::Aes256;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bwu_core::{
     crypto::{
-        CryptoError, EncryptedField, EncryptedString, EncryptedVaultItem, KdfConfig, VaultItemType,
-        VaultKeys, decrypt_account_key, decrypt_organization_key, decrypt_vault_item,
-        derive_master_key, stretch_key,
+        CryptoError, EncryptedField, EncryptedString, EncryptedVaultItem, KdfConfig,
+        RsaEncryptedString, VaultItemType, VaultKeys, decrypt_account_key,
+        decrypt_organization_key, decrypt_private_key, decrypt_vault_item, derive_master_key,
+        stretch_key,
     },
     redaction::SecretString,
 };
+use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use hmac::{Hmac, Mac};
+use openssl::{
+    md::Md,
+    pkey::PKey,
+    pkey_ctx::PkeyCtx,
+    rsa::{Padding, Rsa},
+};
+use sha2::Sha256;
 
 const PROTECTED_ACCOUNT_KEY: &str = "2.YWNjb3VudC1rZXktaXYhIQ==|tgMg75OxorP0hiI5rt3T6bDyt0s9tcvtRQ2FxRGj7HPCjRRW598dqnq1EeWw7Cc+2hzuoLyWr4ZyW5fIKUMqLvsUwwWXa4BZg2aW4vrlfDI=|UeL8DxxJsZpeuTAkas560WEcuosQCwHL6Rk6PwUlzyU=";
-const ENCRYPTED_ORG_KEY: &str = "2.b3JnYW5pei1rZXktaXYhIQ==|IGHGhkaMEkoeCY6BMIOmaPhEx7lpO+3ztBqCta+eM9TOUCo1vDGSxorpaODQfgooLnKeeQgh31NryMpV5wcyEhbGHSoE1xLDhjW06cGdIuA=|4uNcKIEFuX7Io0OCSdZ5wfU3jds4FU5B254+nq+pmKQ=";
 const ENCRYPTED_ITEM_KEY: &str = "2.Y2lwaGVyLWtleS0taXYhIQ==|SvhxYcvkKZHLnNDQW6X/en7ETyJj4gZhnz7tUlCpDW38yu3VqmUzDew2LCZ5q6aZdo5+X+FseMfcwJ7NSpyZsMMoQXL2rcZV+RlnmbZ7+VU=|uDZgT7i1cwUYrDly8RK1548LPPm8Qg+INp0S8ATVF8k=";
+
+type HmacSha256 = Hmac<Sha256>;
+type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 
 fn encrypted_fixture_keys() -> VaultKeys {
     let password = SecretString::new("synthetic-master-password");
@@ -27,11 +41,7 @@ fn encrypted_fixture_keys() -> VaultKeys {
         &stretched,
     )
     .expect("account key should decrypt");
-    let org_key = decrypt_organization_key(
-        &EncryptedString::parse(ENCRYPTED_ORG_KEY).expect("org key should parse"),
-        &account_key,
-    )
-    .expect("organization key should decrypt");
+    let org_key = synthetic_org_key();
 
     let mut organization_keys = BTreeMap::new();
     organization_keys.insert("org-1".to_owned(), org_key);
@@ -39,6 +49,69 @@ fn encrypted_fixture_keys() -> VaultKeys {
         account_key,
         organization_keys,
     }
+}
+
+fn synthetic_org_key() -> bwu_core::crypto::SymmetricKey {
+    bwu_core::crypto::SymmetricKey::new((0x50_u8..=0x8f).collect::<Vec<_>>())
+        .expect("synthetic organization key should be valid")
+}
+
+fn encrypt_symmetric_fixture(
+    plaintext: &[u8],
+    key: &bwu_core::crypto::SymmetricKey,
+    iv: &[u8; 16],
+) -> String {
+    let (enc_key, mac_key) = key.expose_key().split_at(32);
+    let ciphertext = Aes256CbcEncryptor::new_from_slices(enc_key, iv)
+        .expect("synthetic fixture key and IV should be valid")
+        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+
+    let mut hmac =
+        HmacSha256::new_from_slice(mac_key).expect("synthetic fixture HMAC key should be valid");
+    hmac.update(iv);
+    hmac.update(&ciphertext);
+    let mac = hmac.finalize().into_bytes();
+
+    format!(
+        "2.{}|{}|{}",
+        STANDARD.encode(iv),
+        STANDARD.encode(ciphertext),
+        STANDARD.encode(mac)
+    )
+}
+
+fn rsa_organization_key_fixture() -> (String, String) {
+    let rsa = Rsa::generate(2048).expect("synthetic RSA key should generate");
+    let pkey = PKey::from_rsa(rsa).expect("synthetic RSA key should convert");
+    let private_pem = String::from_utf8(
+        pkey.private_key_to_pem_pkcs8()
+            .expect("synthetic RSA key should encode"),
+    )
+    .expect("synthetic RSA key PEM should be UTF-8");
+
+    let mut context = PkeyCtx::new(&pkey).expect("synthetic RSA context should create");
+    context
+        .encrypt_init()
+        .expect("synthetic RSA context should initialize encryption");
+    context
+        .set_rsa_padding(Padding::PKCS1_OAEP)
+        .expect("synthetic RSA context should set OAEP padding");
+    context
+        .set_rsa_oaep_md(Md::sha256())
+        .expect("synthetic RSA context should set OAEP digest");
+    context
+        .set_rsa_mgf1_md(Md::sha256())
+        .expect("synthetic RSA context should set MGF1 digest");
+
+    let mut encrypted_org_key = Vec::new();
+    context
+        .encrypt_to_vec(synthetic_org_key().expose_key(), &mut encrypted_org_key)
+        .expect("synthetic organization key should RSA-encrypt");
+
+    (
+        private_pem,
+        format!("3.{}", STANDARD.encode(encrypted_org_key)),
+    )
 }
 
 fn encrypted_field(name: &str, encrypted: &str) -> EncryptedField {
@@ -74,6 +147,44 @@ fn assert_field(item: &bwu_core::crypto::DecryptedVaultItem, name: &str, expecte
         actual.expose_secret() == expected,
         "decrypted field {name} did not match the synthetic fixture"
     );
+}
+
+#[test]
+fn encrypted_fixtures_unwrap_organization_key_with_decrypted_rsa_private_key() {
+    let keys = encrypted_fixture_keys();
+    let (private_pem, encrypted_org_key) = rsa_organization_key_fixture();
+    let encrypted_private_key = encrypt_symmetric_fixture(
+        private_pem.as_bytes(),
+        &keys.account_key,
+        b"rsa-private-iv!!",
+    );
+
+    let private_key = decrypt_private_key(
+        &EncryptedString::parse(&encrypted_private_key)
+            .expect("encrypted private key fixture should parse"),
+        &keys.account_key,
+    )
+    .expect("private key should decrypt");
+    let org_key = decrypt_organization_key(
+        &RsaEncryptedString::parse(&encrypted_org_key)
+            .expect("RSA organization key fixture should parse"),
+        &private_key,
+    )
+    .expect("organization key should unwrap through the user's RSA private key");
+
+    assert_eq!(org_key, synthetic_org_key());
+
+    let rendered = format!("{private_key:?} {org_key:?}");
+    for secret in [
+        "BEGIN PRIVATE KEY",
+        "505152535455565758595a5b5c5d5e5f",
+        "cnNhLW9hZXA",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "RSA organization-key fixture output leaked secret material"
+        );
+    }
 }
 
 #[test]
