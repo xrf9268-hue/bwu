@@ -42,6 +42,9 @@ const PBKDF2_PRELOGIN_MIN_ITERATIONS: u32 = 5_000;
 const ARGON2ID_PRELOGIN_MIN_ITERATIONS: u32 = 2;
 const ARGON2ID_PRELOGIN_MIN_MEMORY_MIB: u32 = 16;
 const ARGON2ID_PRELOGIN_MIN_PARALLELISM: u32 = 1;
+const ARGON2ID_PRELOGIN_MAX_ITERATIONS: u32 = 10;
+const ARGON2ID_PRELOGIN_MAX_MEMORY_MIB: u32 = 1_024;
+const ARGON2ID_PRELOGIN_MAX_PARALLELISM: u32 = 16;
 
 /// Errors from the crypto core.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -133,15 +136,38 @@ impl KdfConfig {
                 iterations,
                 memory_mib,
                 parallelism,
-            } if iterations >= ARGON2ID_PRELOGIN_MIN_ITERATIONS
-                && memory_mib >= ARGON2ID_PRELOGIN_MIN_MEMORY_MIB
-                && parallelism >= ARGON2ID_PRELOGIN_MIN_PARALLELISM =>
+            } if (ARGON2ID_PRELOGIN_MIN_ITERATIONS..=ARGON2ID_PRELOGIN_MAX_ITERATIONS)
+                .contains(&iterations)
+                && (ARGON2ID_PRELOGIN_MIN_MEMORY_MIB..=ARGON2ID_PRELOGIN_MAX_MEMORY_MIB)
+                    .contains(&memory_mib)
+                && (ARGON2ID_PRELOGIN_MIN_PARALLELISM..=ARGON2ID_PRELOGIN_MAX_PARALLELISM)
+                    .contains(&parallelism) =>
             {
                 Ok(())
             }
             Self::Pbkdf2Sha256 { .. } | Self::Argon2id { .. } => {
                 Err(CryptoError::InvalidKdfParameters)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CryptoError, KdfConfig};
+
+    #[test]
+    fn argon2id_prelogin_validation_rejects_oversized_metadata_before_hashing() {
+        for config in [
+            KdfConfig::argon2id(11, 16, 1),
+            KdfConfig::argon2id(2, 1_025, 1),
+            KdfConfig::argon2id(2, 16, 17),
+        ] {
+            assert_eq!(
+                config.validate(),
+                Err(CryptoError::InvalidKdfParameters),
+                "oversized Argon2id pre-login metadata should fail before hashing"
+            );
         }
     }
 }
