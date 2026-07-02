@@ -8,5 +8,9 @@ readme.workspace = true
 publish.workspace = true
 description = "Shared command metadata, namespace constants, and skeleton errors for bwu."
 
+[dependencies]
+rustix = { version = "1.1.4", features = ["process"] }
+zeroize = { version = "1.8.2", features = ["alloc"] }
+
 [lints]
 workspace = true

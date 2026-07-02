@@ -7,10 +7,12 @@ use bwu_core::{
     NotImplemented,
     command::{AGENT_COMMANDS, planned_agent_operation_label, wants_help},
     namespace::{AGENT_DEFAULT_TIMEOUT_SECONDS, AGENT_SOCKET_NAME, RUNTIME_DIR_NAME},
+    paths::{RootKind, RuntimePaths, extract_root_overrides},
 };
 
 const NOT_IMPLEMENTED_EXIT: i32 = 2;
 const USAGE_EXIT: i32 = 64;
+const PATH_ERROR_EXIT: i32 = 74;
 
 /// Captured command result for the agent binary entrypoint and tests.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -45,12 +47,22 @@ impl AgentOutcome {
 #[must_use]
 pub fn run(args: impl IntoIterator<Item = String>) -> AgentOutcome {
     let args: Vec<String> = args.into_iter().collect();
+    let (args, root_overrides) = match extract_root_overrides(args, &[RootKind::Runtime]) {
+        Ok(parsed) => parsed,
+        Err(err) => return AgentOutcome::error(USAGE_EXIT, format!("{err}\n")),
+    };
 
     if wants_help(&args) {
         return AgentOutcome::success(help_text());
     }
 
     if let Some(operation) = planned_agent_operation_label(&args) {
+        if let Err(err) =
+            RuntimePaths::resolve(&root_overrides).and_then(|paths| paths.ensure_owner_only_dir())
+        {
+            return AgentOutcome::error(PATH_ERROR_EXIT, format!("{err}\n"));
+        }
+
         return AgentOutcome::error(
             NOT_IMPLEMENTED_EXIT,
             format!("{}\n", NotImplemented::agent(operation)),
@@ -74,6 +86,9 @@ pub fn help_text() -> String {
     .expect("writing to String cannot fail");
     writeln!(help).expect("writing to String cannot fail");
     writeln!(help, "Usage: bwu-agent <command> [options]").expect("writing to String cannot fail");
+    writeln!(help).expect("writing to String cannot fail");
+    writeln!(help, "Test root overrides:").expect("writing to String cannot fail");
+    writeln!(help, "  --runtime-root <path>").expect("writing to String cannot fail");
     writeln!(help).expect("writing to String cannot fail");
     writeln!(
         help,
