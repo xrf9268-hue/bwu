@@ -234,7 +234,7 @@ fn agent_paths_reject_relative_runtime_root_override() {
 
     assert_eq!(
         output.status.code(),
-        Some(74),
+        Some(64),
         "relative runtime override should fail closed"
     );
     let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");

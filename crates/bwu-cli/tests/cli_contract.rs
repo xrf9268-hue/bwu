@@ -288,7 +288,7 @@ fn cli_paths_reject_relative_root_overrides() {
 
         assert_eq!(
             output.status.code(),
-            Some(74),
+            Some(64),
             "{invalid_flag} should reject relative root overrides"
         );
         let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");

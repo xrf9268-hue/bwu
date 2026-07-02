@@ -2,7 +2,10 @@ use std::path::{Component, Path, PathBuf};
 
 use bwu_core::{
     namespace::{AGENT_SOCKET_NAME, APP_NAMESPACE},
-    paths::{AppPaths, RootOverrides, RuntimePaths, default_root_env_vars},
+    paths::{
+        AppPaths, RootKind, RootOverrides, RuntimePaths, default_root_env_vars,
+        extract_root_overrides,
+    },
 };
 
 fn path_components(path: &Path) -> Vec<String> {
@@ -59,6 +62,32 @@ fn paths_are_isolated_from_rbw_paths_and_environment_names() {
             .any(|name| name.to_ascii_lowercase().contains("rbw")),
         "default path resolution must not consult rbw environment variables"
     );
+}
+
+#[test]
+fn root_override_parser_rejects_relative_values_before_storage() {
+    for (flag, value, kind) in [
+        ("--config-root", "relative-config", RootKind::Config),
+        ("--cache-root", "relative-cache", RootKind::Cache),
+        ("--data-root", "relative-data", RootKind::Data),
+        ("--runtime-root", "relative-runtime", RootKind::Runtime),
+    ] {
+        let err = extract_root_overrides(
+            ["item", "list", flag, value].into_iter().map(str::to_owned),
+            &[kind],
+        )
+        .expect_err("relative root override should be rejected before it is stored");
+        let message = err.to_string();
+
+        assert!(
+            message.contains(flag),
+            "error should name the rejected flag {flag}: {message}"
+        );
+        assert!(
+            message.contains("root override must be absolute"),
+            "error should explain the absolute-root requirement: {message}"
+        );
+    }
 }
 
 #[test]

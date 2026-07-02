@@ -211,6 +211,11 @@ pub enum RootOverrideParseError {
         /// Unsupported flag.
         flag: &'static str,
     },
+    /// A supported root override flag was given a relative path.
+    RelativeValue {
+        /// Flag that received a relative path.
+        flag: &'static str,
+    },
 }
 
 impl fmt::Display for RootOverrideParseError {
@@ -218,6 +223,9 @@ impl fmt::Display for RootOverrideParseError {
         match self {
             Self::MissingValue { flag } => write!(formatter, "{flag} requires a path value"),
             Self::UnsupportedFlag { flag } => write!(formatter, "{flag} is not supported here"),
+            Self::RelativeValue { flag } => {
+                write!(formatter, "{flag} root override must be absolute")
+            }
         }
     }
 }
@@ -241,6 +249,10 @@ pub fn extract_root_overrides(
             let value = args
                 .next()
                 .ok_or(RootOverrideParseError::MissingValue { flag: kind.flag() })?;
+            let value = PathBuf::from(value);
+            if !value.is_absolute() {
+                return Err(RootOverrideParseError::RelativeValue { flag: kind.flag() });
+            }
             overrides.set(kind, value);
         } else {
             sanitized.push(arg);
