@@ -360,7 +360,7 @@ const OWNER_ONLY_DIR_MODE: u32 = 0o700;
 
 #[cfg(unix)]
 trait DirOps {
-    fn path_is_dir(&self, path: &Path) -> bool;
+    fn path_exists(&self, path: &Path) -> io::Result<bool>;
     fn path_is_symlink(&self, path: &Path) -> io::Result<bool>;
     fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
     fn owner_id(&self, path: &Path) -> io::Result<u32>;
@@ -374,8 +374,12 @@ struct RealDirOps;
 
 #[cfg(unix)]
 impl DirOps for RealDirOps {
-    fn path_is_dir(&self, path: &Path) -> bool {
-        path.is_dir()
+    fn path_exists(&self, path: &Path) -> io::Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     fn path_is_symlink(&self, path: &Path) -> io::Result<bool> {
@@ -425,7 +429,10 @@ fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
 #[cfg(unix)]
 fn ensure_owner_only_dir_with_ops(path: &Path, ops: &impl DirOps) -> Result<(), PathError> {
     reject_symlinked_namespace_dir(path, ops)?;
-    let existed = ops.path_is_dir(path);
+    let existed = ops.path_exists(path).map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     ops.create_dir_all_with_mode(path, OWNER_ONLY_DIR_MODE)
         .map_err(|source| PathError::Io {
             path: path.to_path_buf(),
@@ -582,8 +589,8 @@ mod tests {
     }
 
     impl DirOps for FakeDirOps {
-        fn path_is_dir(&self, _path: &Path) -> bool {
-            self.existed
+        fn path_exists(&self, _path: &Path) -> io::Result<bool> {
+            Ok(self.existed)
         }
 
         fn path_is_symlink(&self, _path: &Path) -> io::Result<bool> {
