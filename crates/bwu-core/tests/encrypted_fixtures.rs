@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use bwu_core::{
     crypto::{
-        EncryptedField, EncryptedString, EncryptedVaultItem, KdfConfig, VaultItemType, VaultKeys,
-        decrypt_account_key, decrypt_organization_key, decrypt_vault_item, derive_master_key,
-        stretch_key,
+        CryptoError, EncryptedField, EncryptedString, EncryptedVaultItem, KdfConfig, VaultItemType,
+        VaultKeys, decrypt_account_key, decrypt_organization_key, decrypt_vault_item,
+        derive_master_key, stretch_key,
     },
     redaction::SecretString,
 };
@@ -230,4 +230,67 @@ fn encrypted_fixtures_fail_closed_on_tampered_mac_without_plaintext_leaks() {
         !rendered.contains("sD8mAeE41o4csR0ibSJJaKm5VEfJmfuDnURAdvwks5k"),
         "decrypt error output echoed ciphertext"
     );
+}
+
+#[test]
+fn encrypted_fixtures_fail_closed_when_organization_key_is_missing_without_secret_leaks() {
+    let keys = encrypted_fixture_keys();
+    let missing_org_item = EncryptedVaultItem {
+        item_type: VaultItemType::Login,
+        organization_id: Some("org-missing-from-unlocked-keys".to_owned()),
+        item_key: Some(EncryptedString::parse(ENCRYPTED_ITEM_KEY).expect("item key should parse")),
+        fields: vec![encrypted_field(
+            "login.password",
+            "2.ZmllbGQtZml4dHVyZS0wMg==|54s4esk34MwBDjV9UTaVctbyPYRqqg3oTCGEwoIn3aA=|HRsiSyGMvQ+lP+xTNp91iNwfCY57HqFZAu1TiA+UT70=",
+        )],
+    };
+
+    let err = decrypt_vault_item(&missing_org_item, &keys)
+        .expect_err("organization items without an unlocked organization key should fail closed");
+    assert_eq!(err, CryptoError::MissingOrganizationKey);
+
+    let rendered = format!("{err:?} {err}");
+    for secret in [
+        "synthetic-login-password",
+        "SvhxYcvkKZHLnNDQW6X/en7ETyJj4gZhnz7tUlCpDW38",
+        "54s4esk34MwBDjV9UTaVctbyPYRqqg3oTCGEwoIn3aA",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "missing organization key error output leaked fixture material"
+        );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_fail_closed_on_duplicate_fields_without_secret_leaks() {
+    let keys = encrypted_fixture_keys();
+    let duplicate = personal_item(
+        VaultItemType::SecureNote,
+        vec![
+            encrypted_field(
+                "secure_note.notes",
+                "2.cGVyc29uYWwtbm90ZS1pdg==|sD8mAeE41o4csR0ibSJJaKm5VEfJmfuDnURAdvwks5k=|/cSHGtMw6f6kg12awnTjaqK3CelEN7bQciN3NiJZgg8=",
+            ),
+            encrypted_field(
+                "secure_note.notes",
+                "2.cGVyc29uYWwtbm90ZS1pdg==|sD8mAeE41o4csR0ibSJJaKm5VEfJmfuDnURAdvwks5k=|/cSHGtMw6f6kg12awnTjaqK3CelEN7bQciN3NiJZgg8=",
+            ),
+        ],
+    );
+
+    let err = decrypt_vault_item(&duplicate, &keys)
+        .expect_err("duplicate encrypted field names should fail closed");
+    assert_eq!(err, CryptoError::DuplicateFieldName);
+
+    let rendered = format!("{err:?} {err}");
+    for secret in [
+        "personal account-key note",
+        "sD8mAeE41o4csR0ibSJJaKm5VEfJmfuDnURAdvwks5k",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "duplicate field error output leaked fixture material"
+        );
+    }
 }
