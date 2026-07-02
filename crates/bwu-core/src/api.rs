@@ -635,7 +635,12 @@ pub struct UserDecryptionOptions {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 pub struct MasterPasswordUnlockOption {
     /// User key encrypted by the master key.
-    #[serde(rename = "MasterKeyWrappedUserKey", alias = "masterKeyWrappedUserKey")]
+    #[serde(
+        rename = "MasterKeyEncryptedUserKey",
+        alias = "masterKeyEncryptedUserKey",
+        alias = "MasterKeyWrappedUserKey",
+        alias = "masterKeyWrappedUserKey"
+    )]
     pub master_key_wrapped_user_key: Option<SecretString>,
 }
 

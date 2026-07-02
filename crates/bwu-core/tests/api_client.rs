@@ -361,6 +361,49 @@ fn token_response_debug_redacts_nested_user_decryption_options() {
 }
 
 #[test]
+fn token_response_parses_master_key_encrypted_user_key_and_redacts_it() {
+    let response: TokenResponse = serde_json::from_str(
+        r#"{
+            "access_token":"synthetic-access-token",
+            "expires_in":3600,
+            "refresh_token":"synthetic-refresh-token",
+            "token_type":"Bearer",
+            "UserDecryptionOptions":{
+                "MasterPasswordUnlock":{
+                    "MasterKeyEncryptedUserKey":"2.synthetic-master-key-encrypted-user-key"
+                }
+            }
+        }"#,
+    )
+    .expect("token response should parse master-password unlock envelope");
+
+    let master_password_unlock = response
+        .user_decryption_options
+        .as_ref()
+        .and_then(|options| options.master_password_unlock.as_ref())
+        .expect("master-password unlock option should be present");
+    let wrapped_user_key = master_password_unlock
+        .master_key_wrapped_user_key
+        .as_ref()
+        .expect("official MasterKeyEncryptedUserKey field should populate wrapped user key");
+
+    assert_eq!(
+        wrapped_user_key.as_str(),
+        "2.synthetic-master-key-encrypted-user-key"
+    );
+
+    let rendered = format!("{response:?}");
+    assert!(
+        !rendered.contains("2.synthetic-master-key-encrypted-user-key"),
+        "TokenResponse debug leaked master-password unlock secret: {rendered}"
+    );
+    assert!(
+        rendered.contains("<redacted>"),
+        "TokenResponse debug should make master-password unlock redaction visible: {rendered}"
+    );
+}
+
+#[test]
 fn api_key_token_request_uses_client_credentials_scope() {
     let mut server = Server::new();
     let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
