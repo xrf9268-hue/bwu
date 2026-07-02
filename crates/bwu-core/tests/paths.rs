@@ -149,6 +149,42 @@ fn paths_creation_uses_owner_only_permissions_where_supported() {
     std::fs::remove_dir_all(temp).expect("test temp tree should be removable");
 }
 
+#[cfg(unix)]
+#[test]
+fn paths_reject_symlinked_namespace_directories() {
+    use std::os::unix::fs::symlink;
+
+    let temp = std::env::temp_dir().join(format!(
+        "bwu-paths-symlinked-namespace-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let config_root = temp.join("config-root");
+    let symlink_target = temp.join("redirect-target");
+    std::fs::create_dir_all(&config_root).expect("config root should be creatable");
+    std::fs::create_dir_all(&symlink_target).expect("symlink target should be creatable");
+
+    let overrides = RootOverrides {
+        config: Some(config_root),
+        cache: Some(temp.join("cache-root")),
+        data: Some(temp.join("data-root")),
+        runtime: Some(temp.join("runtime-root")),
+    };
+    let paths = AppPaths::resolve(&overrides).expect("path overrides should resolve");
+    symlink(&symlink_target, &paths.config_dir).expect("symlinked namespace should be creatable");
+
+    let err = paths
+        .ensure_owner_only_dirs()
+        .expect_err("symlinked bwu namespace directory should fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("symbolic link"),
+        "error should explain that symlinked namespace directories are rejected: {message}"
+    );
+
+    std::fs::remove_dir_all(temp).expect("test temp tree should be removable");
+}
+
 #[test]
 fn paths_reject_relative_root_overrides_before_namespace_creation() {
     let absolute = std::env::temp_dir().join(format!(

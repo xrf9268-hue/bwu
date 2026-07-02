@@ -361,6 +361,7 @@ const OWNER_ONLY_DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
 trait DirOps {
     fn path_is_dir(&self, path: &Path) -> bool;
+    fn path_is_symlink(&self, path: &Path) -> io::Result<bool>;
     fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()>;
     fn owner_id(&self, path: &Path) -> io::Result<u32>;
     fn effective_owner_id(&self) -> io::Result<u32>;
@@ -375,6 +376,14 @@ struct RealDirOps;
 impl DirOps for RealDirOps {
     fn path_is_dir(&self, path: &Path) -> bool {
         path.is_dir()
+    }
+
+    fn path_is_symlink(&self, path: &Path) -> io::Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     fn create_dir_all_with_mode(&self, path: &Path, mode: u32) -> io::Result<()> {
@@ -415,12 +424,14 @@ fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
 
 #[cfg(unix)]
 fn ensure_owner_only_dir_with_ops(path: &Path, ops: &impl DirOps) -> Result<(), PathError> {
+    reject_symlinked_namespace_dir(path, ops)?;
     let existed = ops.path_is_dir(path);
     ops.create_dir_all_with_mode(path, OWNER_ONLY_DIR_MODE)
         .map_err(|source| PathError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+    reject_symlinked_namespace_dir(path, ops)?;
 
     let mode = ops.permissions_mode(path).map_err(|source| PathError::Io {
         path: path.to_path_buf(),
@@ -477,6 +488,24 @@ fn ensure_owner_only_dir_with_ops(path: &Path, ops: &impl DirOps) -> Result<(), 
     })
 }
 
+#[cfg(unix)]
+fn reject_symlinked_namespace_dir(path: &Path, ops: &impl DirOps) -> Result<(), PathError> {
+    let is_symlink = ops.path_is_symlink(path).map_err(|source| PathError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if is_symlink {
+        return Err(PathError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "bwu namespace directory is a symbolic link",
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn ensure_owner_only_dir(path: &Path) -> Result<(), PathError> {
     fs::create_dir_all(path).map_err(|source| PathError::Io {
@@ -498,6 +527,7 @@ mod tests {
         mode: Cell<u32>,
         owner_id: Cell<u32>,
         effective_owner_id: Cell<u32>,
+        is_symlink: bool,
         create_modes: RefCell<Vec<u32>>,
         chmod_calls: Cell<usize>,
         chmod_error: bool,
@@ -510,6 +540,7 @@ mod tests {
                 mode: Cell::new(mode),
                 owner_id: Cell::new(1000),
                 effective_owner_id: Cell::new(1000),
+                is_symlink: false,
                 create_modes: RefCell::new(Vec::new()),
                 chmod_calls: Cell::new(0),
                 chmod_error: false,
@@ -522,6 +553,7 @@ mod tests {
                 mode: Cell::new(mode),
                 owner_id: Cell::new(1000),
                 effective_owner_id: Cell::new(1000),
+                is_symlink: false,
                 create_modes: RefCell::new(Vec::new()),
                 chmod_calls: Cell::new(0),
                 chmod_error: false,
@@ -542,11 +574,20 @@ mod tests {
             self.effective_owner_id.set(effective_owner_id);
             self
         }
+
+        fn symlinked(mut self) -> Self {
+            self.is_symlink = true;
+            self
+        }
     }
 
     impl DirOps for FakeDirOps {
         fn path_is_dir(&self, _path: &Path) -> bool {
             self.existed
+        }
+
+        fn path_is_symlink(&self, _path: &Path) -> io::Result<bool> {
+            Ok(self.is_symlink)
         }
 
         fn create_dir_all_with_mode(&self, _path: &Path, mode: u32) -> io::Result<()> {
@@ -623,6 +664,25 @@ mod tests {
             ops.chmod_calls.get(),
             0,
             "mode changes cannot fix a directory owned by another user"
+        );
+    }
+
+    #[test]
+    fn existing_unix_dirs_fail_closed_when_namespace_is_symlinked() {
+        let ops = FakeDirOps::existing_with_mode(0o700).symlinked();
+
+        let err = ensure_owner_only_dir_with_ops(Path::new("/synthetic/bwu"), &ops)
+            .expect_err("symlinked namespace directory should fail closed");
+
+        assert!(matches!(err, PathError::Io { .. }));
+        assert!(
+            ops.create_modes.borrow().is_empty(),
+            "symlinked namespace directories must be rejected before creation follows the link"
+        );
+        assert_eq!(
+            ops.chmod_calls.get(),
+            0,
+            "mode changes cannot make a symlinked namespace safe"
         );
     }
 }
