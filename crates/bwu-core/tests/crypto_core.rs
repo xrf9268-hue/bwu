@@ -118,10 +118,22 @@ fn crypto_core_rsa_encrypted_string_parser_accepts_official_rsa_oaep_shapes() {
         .expect("RSA-OAEP-SHA1 encrypted string should parse");
     assert_eq!(sha1.encryption_type(), 4);
 
+    let legacy_sha256 =
+        RsaEncryptedString::parse("5.cnNhLW9hZXAtc2hhMjU2LWZpeHR1cmU=|bGVnYWN5LW1hYw==")
+            .expect("legacy RSA-OAEP-SHA256-HMAC encrypted string should parse");
+    assert_eq!(legacy_sha256.encryption_type(), 5);
+
+    let legacy_sha1 = RsaEncryptedString::parse("6.cnNhLW9hZXAtc2hhMS1maXh0dXJl|bGVnYWN5LW1hYw==")
+        .expect("legacy RSA-OAEP-SHA1-HMAC encrypted string should parse");
+    assert_eq!(legacy_sha1.encryption_type(), 6);
+
     for malformed in [
         "2.YWNjb3VudC1rZXktaXYhIQ==|ciphertext|mac",
         "3.not-base64",
         "3.cGF5bG9hZA==|unexpected-mac",
+        "5.cGF5bG9hZA==",
+        "5.cGF5bG9hZA==|not-base64",
+        "5.cGF5bG9hZA==|bWFj|extra",
         "7.cGF5bG9hZA==",
     ] {
         let err = RsaEncryptedString::parse(malformed)

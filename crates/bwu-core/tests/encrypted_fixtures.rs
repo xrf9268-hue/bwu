@@ -14,7 +14,7 @@ use bwu_core::{
 use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use hmac::{Hmac, Mac};
 use openssl::{
-    md::Md,
+    md::{Md, MdRef},
     pkey::PKey,
     pkey_ctx::PkeyCtx,
     rsa::{Padding, Rsa},
@@ -23,6 +23,7 @@ use sha2::Sha256;
 
 const PROTECTED_ACCOUNT_KEY: &str = "2.YWNjb3VudC1rZXktaXYhIQ==|tgMg75OxorP0hiI5rt3T6bDyt0s9tcvtRQ2FxRGj7HPCjRRW598dqnq1EeWw7Cc+2hzuoLyWr4ZyW5fIKUMqLvsUwwWXa4BZg2aW4vrlfDI=|UeL8DxxJsZpeuTAkas560WEcuosQCwHL6Rk6PwUlzyU=";
 const ENCRYPTED_ITEM_KEY: &str = "2.Y2lwaGVyLWtleS0taXYhIQ==|SvhxYcvkKZHLnNDQW6X/en7ETyJj4gZhnz7tUlCpDW38yu3VqmUzDew2LCZ5q6aZdo5+X+FseMfcwJ7NSpyZsMMoQXL2rcZV+RlnmbZ7+VU=|uDZgT7i1cwUYrDly8RK1548LPPm8Qg+INp0S8ATVF8k=";
+const LEGACY_RSA_ORG_KEY_MAC: &[u8] = b"synthetic-legacy-org-key-mac";
 
 type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
@@ -81,6 +82,14 @@ fn encrypt_symmetric_fixture(
 }
 
 fn rsa_organization_key_fixture() -> (String, Vec<u8>, String) {
+    rsa_organization_key_fixture_with(3, Md::sha256(), None)
+}
+
+fn rsa_organization_key_fixture_with(
+    encryption_type: u8,
+    digest: &'static MdRef,
+    legacy_mac: Option<&[u8]>,
+) -> (String, Vec<u8>, String) {
     let rsa = Rsa::generate(2048).expect("synthetic RSA key should generate");
     let pkey = PKey::from_rsa(rsa).expect("synthetic RSA key should convert");
     let private_pem = String::from_utf8(
@@ -100,10 +109,10 @@ fn rsa_organization_key_fixture() -> (String, Vec<u8>, String) {
         .set_rsa_padding(Padding::PKCS1_OAEP)
         .expect("synthetic RSA context should set OAEP padding");
     context
-        .set_rsa_oaep_md(Md::sha256())
+        .set_rsa_oaep_md(digest)
         .expect("synthetic RSA context should set OAEP digest");
     context
-        .set_rsa_mgf1_md(Md::sha256())
+        .set_rsa_mgf1_md(digest)
         .expect("synthetic RSA context should set MGF1 digest");
 
     let mut encrypted_org_key = Vec::new();
@@ -111,10 +120,16 @@ fn rsa_organization_key_fixture() -> (String, Vec<u8>, String) {
         .encrypt_to_vec(synthetic_org_key().expose_key(), &mut encrypted_org_key)
         .expect("synthetic organization key should RSA-encrypt");
 
+    let mut payload = STANDARD.encode(encrypted_org_key);
+    if let Some(mac) = legacy_mac {
+        payload.push('|');
+        payload.push_str(&STANDARD.encode(mac));
+    }
+
     (
         private_pem,
         private_der,
-        format!("3.{}", STANDARD.encode(encrypted_org_key)),
+        format!("{encryption_type}.{payload}"),
     )
 }
 
@@ -223,6 +238,50 @@ fn encrypted_fixtures_unwrap_organization_key_with_der_private_key_bytes() {
             !rendered.contains(&secret),
             "DER private-key fixture output leaked secret material"
         );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_unwrap_legacy_rsa_organization_key_shapes() {
+    let keys = encrypted_fixture_keys();
+
+    for (encryption_type, digest, iv) in [
+        (5, Md::sha256(), b"legacy-rsa-iv005"),
+        (6, Md::sha1(), b"legacy-rsa-iv006"),
+    ] {
+        let (_private_pem, private_der, encrypted_org_key) = rsa_organization_key_fixture_with(
+            encryption_type,
+            digest,
+            Some(LEGACY_RSA_ORG_KEY_MAC),
+        );
+        let encrypted_private_key = encrypt_symmetric_fixture(&private_der, &keys.account_key, iv);
+
+        let private_key = decrypt_private_key(
+            &EncryptedString::parse(&encrypted_private_key)
+                .expect("encrypted DER private key fixture should parse"),
+            &keys.account_key,
+        )
+        .expect("DER private key bytes should decrypt");
+        let org_key = decrypt_organization_key(
+            &RsaEncryptedString::parse(&encrypted_org_key)
+                .expect("legacy RSA organization key fixture should parse"),
+            &private_key,
+        )
+        .expect("legacy RSA organization key should unwrap through the same OAEP path");
+
+        assert_eq!(org_key, synthetic_org_key());
+
+        let rendered = format!("{private_key:?} {org_key:?}");
+        for secret in [
+            STANDARD.encode(&private_der[..24]),
+            STANDARD.encode(LEGACY_RSA_ORG_KEY_MAC),
+            "505152535455565758595a5b5c5d5e5f".to_owned(),
+        ] {
+            assert!(
+                !rendered.contains(&secret),
+                "legacy RSA organization-key fixture output leaked secret material"
+            );
+        }
     }
 }
 

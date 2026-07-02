@@ -3,7 +3,7 @@
 //! This module implements the small M3 read path needed by `bwu`: KDF handling,
 //! authenticated encrypted-string parsing/decryption, and explicit key unwrap
 //! flows for account, organization, item, and field data. It fails closed on
-//! legacy or unknown encryption formats rather than silently attempting unsafe
+//! unknown encryption formats rather than silently attempting unsafe
 //! compatibility behavior.
 
 use std::{collections::BTreeMap, fmt};
@@ -32,6 +32,8 @@ type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 const AES_CBC_256_HMAC_SHA256: u8 = 2;
 const RSA_2048_OAEP_SHA256: u8 = 3;
 const RSA_2048_OAEP_SHA1: u8 = 4;
+const RSA_2048_OAEP_SHA256_HMAC_SHA256: u8 = 5;
+const RSA_2048_OAEP_SHA1_HMAC_SHA256: u8 = 6;
 const AES_KEY_LEN: usize = 32;
 const SYMMETRIC_HMAC_KEY_LEN: usize = 64;
 const AES_BLOCK_LEN: usize = 16;
@@ -270,7 +272,9 @@ impl RsaEncryptedString {
     /// Parses a serialized Bitwarden RSA encrypted string.
     ///
     /// Organization keys are protected with the user's RSA public key in
-    /// single-payload RSA-OAEP encrypted strings.
+    /// RSA-OAEP encrypted strings. Current type 3/4 strings carry one
+    /// ciphertext payload; deprecated type 5/6 strings carry the same
+    /// ciphertext plus a legacy MAC payload.
     pub fn parse(value: &str) -> Result<Self, CryptoError> {
         let (prefix, payload) = value
             .split_once('.')
@@ -278,16 +282,37 @@ impl RsaEncryptedString {
         let encryption_type = prefix
             .parse::<u8>()
             .map_err(|_| CryptoError::InvalidEncryptedString)?;
-        if !matches!(encryption_type, RSA_2048_OAEP_SHA256 | RSA_2048_OAEP_SHA1) {
-            return Err(CryptoError::UnsupportedEncryptionType);
-        }
-        if payload.contains('|') {
-            return Err(CryptoError::InvalidEncryptedString);
-        }
 
-        let data = STANDARD
-            .decode(payload)
-            .map_err(|_| CryptoError::InvalidBase64)?;
+        let data = match encryption_type {
+            RSA_2048_OAEP_SHA256 | RSA_2048_OAEP_SHA1 => {
+                if payload.contains('|') {
+                    return Err(CryptoError::InvalidEncryptedString);
+                }
+                STANDARD
+                    .decode(payload)
+                    .map_err(|_| CryptoError::InvalidBase64)?
+            }
+            RSA_2048_OAEP_SHA256_HMAC_SHA256 | RSA_2048_OAEP_SHA1_HMAC_SHA256 => {
+                let mut pieces = payload.split('|');
+                let data = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
+                let mac = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
+                if pieces.next().is_some() {
+                    return Err(CryptoError::InvalidEncryptedString);
+                }
+
+                let data = STANDARD
+                    .decode(data)
+                    .map_err(|_| CryptoError::InvalidBase64)?;
+                let mac = STANDARD
+                    .decode(mac)
+                    .map_err(|_| CryptoError::InvalidBase64)?;
+                if mac.is_empty() {
+                    return Err(CryptoError::InvalidEncryptedString);
+                }
+                data
+            }
+            _ => return Err(CryptoError::UnsupportedEncryptionType),
+        };
         if data.is_empty() {
             return Err(CryptoError::InvalidEncryptedString);
         }
@@ -487,8 +512,8 @@ pub fn decrypt_organization_key(
 ) -> Result<SymmetricKey, CryptoError> {
     let private_key = private_key.parse()?;
     let digest = match encrypted_organization_key.encryption_type {
-        RSA_2048_OAEP_SHA256 => Md::sha256(),
-        RSA_2048_OAEP_SHA1 => Md::sha1(),
+        RSA_2048_OAEP_SHA256 | RSA_2048_OAEP_SHA256_HMAC_SHA256 => Md::sha256(),
+        RSA_2048_OAEP_SHA1 | RSA_2048_OAEP_SHA1_HMAC_SHA256 => Md::sha1(),
         _ => return Err(CryptoError::UnsupportedEncryptionType),
     };
 
