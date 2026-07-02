@@ -39,6 +39,7 @@ const SYMMETRIC_HMAC_KEY_LEN: usize = 64;
 const AES_BLOCK_LEN: usize = 16;
 const HMAC_SHA256_LEN: usize = 32;
 const PBKDF2_PRELOGIN_MIN_ITERATIONS: u32 = 5_000;
+const PBKDF2_PRELOGIN_MAX_ITERATIONS: u32 = 2_000_000;
 const ARGON2ID_PRELOGIN_MIN_ITERATIONS: u32 = 2;
 const ARGON2ID_PRELOGIN_MIN_MEMORY_MIB: u32 = 16;
 const ARGON2ID_PRELOGIN_MIN_PARALLELISM: u32 = 1;
@@ -129,7 +130,10 @@ impl KdfConfig {
 
     fn validate(self) -> Result<(), CryptoError> {
         match self {
-            Self::Pbkdf2Sha256 { iterations } if iterations >= PBKDF2_PRELOGIN_MIN_ITERATIONS => {
+            Self::Pbkdf2Sha256 { iterations }
+                if (PBKDF2_PRELOGIN_MIN_ITERATIONS..=PBKDF2_PRELOGIN_MAX_ITERATIONS)
+                    .contains(&iterations) =>
+            {
                 Ok(())
             }
             Self::Argon2id {
@@ -167,6 +171,26 @@ mod tests {
                 config.validate(),
                 Err(CryptoError::InvalidKdfParameters),
                 "oversized Argon2id pre-login metadata should fail before hashing"
+            );
+        }
+    }
+
+    #[test]
+    fn pbkdf2_prelogin_validation_rejects_oversized_iterations_before_hashing() {
+        for iterations in [2_000_001, u32::MAX] {
+            let err = KdfConfig::pbkdf2_sha256(iterations)
+                .validate()
+                .expect_err("oversized PBKDF2 pre-login metadata should fail before hashing");
+            assert_eq!(err, CryptoError::InvalidKdfParameters);
+
+            let rendered = format!("{err:?} {err}");
+            assert!(
+                !rendered.contains(&iterations.to_string()),
+                "PBKDF2 KDF error output should not echo untrusted metadata"
+            );
+            assert!(
+                !rendered.contains("synthetic-master-password"),
+                "PBKDF2 KDF error output should not echo password material"
             );
         }
     }
