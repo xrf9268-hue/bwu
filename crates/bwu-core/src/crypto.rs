@@ -53,6 +53,7 @@ const XCHACHA20_POLY1305_KEY_LEN: usize = 32;
 const XCHACHA20_POLY1305_NONCE_LEN: usize = 24;
 const MIN_COSE_ENCODED_KEY_LEN: usize = SYMMETRIC_HMAC_KEY_LEN + 1;
 const BITWARDEN_PADDED_UTF8_CONTENT_TYPE: &str = "application/x.bitwarden.utf8-padded";
+const BITWARDEN_LEGACY_KEY_CONTENT_TYPE: &str = "application/x.bitwarden.legacy-key";
 const PBKDF2_PRELOGIN_MIN_ITERATIONS: u32 = 5_000;
 const PBKDF2_PRELOGIN_MAX_ITERATIONS: u32 = 2_000_000;
 const ARGON2ID_PRELOGIN_MIN_ITERATIONS: u32 = 2;
@@ -258,14 +259,20 @@ impl SymmetricKey {
             AES_KEY_LEN | SYMMETRIC_HMAC_KEY_LEN => Ok(Self {
                 material: SymmetricKeyMaterial::Legacy(key),
             }),
-            MIN_COSE_ENCODED_KEY_LEN.. => {
-                let (key, key_id) = parse_padded_cose_symmetric_key(key)?;
+            _ => {
+                let (key, key_id) = parse_padded_or_raw_cose_symmetric_key(key)?;
                 Ok(Self {
                     material: SymmetricKeyMaterial::XChaCha20Poly1305 { key, key_id },
                 })
             }
-            _ => Err(CryptoError::InvalidKeyLength),
         }
+    }
+
+    fn from_raw_cose_key_bytes(key: Zeroizing<Vec<u8>>) -> Result<Self, CryptoError> {
+        let (key, key_id) = parse_raw_cose_symmetric_key(&key)?;
+        Ok(Self {
+            material: SymmetricKeyMaterial::XChaCha20Poly1305 { key, key_id },
+        })
     }
 
     /// Exposes key bytes to deliberate crypto call sites.
@@ -327,6 +334,20 @@ enum EncryptedStringPayload {
     CoseEncrypt0 {
         data: Vec<u8>,
     },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DecryptedContentFormat {
+    Untyped,
+    PaddedUtf8,
+    Pkcs8PrivateKey,
+    CoseKey,
+    BitwardenLegacyKey,
+}
+
+struct DecryptedPayload {
+    bytes: Zeroizing<Vec<u8>>,
+    content_format: DecryptedContentFormat,
 }
 
 struct ParsedAesCbcHmacString {
@@ -634,8 +655,15 @@ pub fn decrypt_private_key(
     encrypted_private_key: &EncryptedString,
     account_key: &SymmetricKey,
 ) -> Result<RsaPrivateKeyMaterial, CryptoError> {
-    let plaintext = decrypt_bytes(encrypted_private_key, account_key)?;
-    RsaPrivateKeyMaterial::from_decrypted_bytes(plaintext)
+    let plaintext = decrypt_payload(encrypted_private_key, account_key)?;
+    match plaintext.content_format {
+        DecryptedContentFormat::Untyped | DecryptedContentFormat::Pkcs8PrivateKey => {
+            RsaPrivateKeyMaterial::from_decrypted_bytes(plaintext.bytes)
+        }
+        DecryptedContentFormat::PaddedUtf8
+        | DecryptedContentFormat::CoseKey
+        | DecryptedContentFormat::BitwardenLegacyKey => Err(CryptoError::UnsupportedEncryptionType),
+    }
 }
 
 /// Decrypts an organization key using the user's decrypted RSA private key.
@@ -688,8 +716,14 @@ pub fn decrypt_field(
     encrypted_field: &EncryptedString,
     key: &SymmetricKey,
 ) -> Result<SecretString, CryptoError> {
-    let plaintext = decrypt_bytes(encrypted_field, key)?;
-    let field = std::str::from_utf8(&plaintext).map_err(|_| CryptoError::InvalidUtf8)?;
+    let plaintext = decrypt_payload(encrypted_field, key)?;
+    if !matches!(
+        plaintext.content_format,
+        DecryptedContentFormat::Untyped | DecryptedContentFormat::PaddedUtf8
+    ) {
+        return Err(CryptoError::UnsupportedEncryptionType);
+    }
+    let field = std::str::from_utf8(&plaintext.bytes).map_err(|_| CryptoError::InvalidUtf8)?;
     Ok(SecretString::new(field.to_owned()))
 }
 
@@ -729,8 +763,16 @@ fn decrypt_symmetric_key(
     encrypted_key: &EncryptedString,
     wrapping_key: &SymmetricKey,
 ) -> Result<SymmetricKey, CryptoError> {
-    let plaintext = decrypt_bytes(encrypted_key, wrapping_key)?;
-    SymmetricKey::new(plaintext.to_vec())
+    let plaintext = decrypt_payload(encrypted_key, wrapping_key)?;
+    match plaintext.content_format {
+        DecryptedContentFormat::Untyped | DecryptedContentFormat::BitwardenLegacyKey => {
+            SymmetricKey::new(plaintext.bytes.to_vec())
+        }
+        DecryptedContentFormat::CoseKey => SymmetricKey::from_raw_cose_key_bytes(plaintext.bytes),
+        DecryptedContentFormat::PaddedUtf8 | DecryptedContentFormat::Pkcs8PrivateKey => {
+            Err(CryptoError::UnsupportedEncryptionType)
+        }
+    }
 }
 
 fn parse_private_key_bytes(key: &[u8]) -> Result<PKey<Private>, CryptoError> {
@@ -743,10 +785,10 @@ fn parse_private_key_bytes(key: &[u8]) -> Result<PKey<Private>, CryptoError> {
     PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidPrivateKey)
 }
 
-fn decrypt_bytes(
+fn decrypt_payload(
     encrypted: &EncryptedString,
     key: &SymmetricKey,
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<DecryptedPayload, CryptoError> {
     match &encrypted.payload {
         EncryptedStringPayload::AesCbcHmac { iv, data, mac } => {
             let (enc_key, mac_key) = key.aes_hmac_parts()?;
@@ -763,7 +805,10 @@ fn decrypt_bytes(
             let plaintext = decryptor
                 .decrypt_padded_vec_mut::<Pkcs7>(data)
                 .map_err(|_| CryptoError::DecryptionFailed)?;
-            Ok(Zeroizing::new(plaintext))
+            Ok(DecryptedPayload {
+                bytes: Zeroizing::new(plaintext),
+                content_format: DecryptedContentFormat::Untyped,
+            })
         }
         EncryptedStringPayload::CoseEncrypt0 { data } => decrypt_cose_encrypt0_bytes(data, key),
     }
@@ -801,7 +846,7 @@ fn parse_aes_cbc_hmac_payload(payload: &str) -> Result<ParsedAesCbcHmacString, C
 fn decrypt_cose_encrypt0_bytes(
     data: &[u8],
     key: &SymmetricKey,
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<DecryptedPayload, CryptoError> {
     let message =
         CoseEncrypt0::from_slice(data).map_err(|_| CryptoError::InvalidEncryptedString)?;
     if message.protected.header.alg != Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305)) {
@@ -822,7 +867,7 @@ fn decrypt_cose_encrypt0_bytes(
         .try_into()
         .map_err(|_| CryptoError::InvalidKeyLength)?;
 
-    let is_padded_utf8 = cose_content_type_is_padded_utf8(&message)?;
+    let content_format = cose_protected_content_format(&message)?;
     let plaintext = message.decrypt_ciphertext(
         &[],
         || CryptoError::InvalidEncryptedString,
@@ -835,32 +880,63 @@ fn decrypt_cose_encrypt0_bytes(
         },
     )?;
 
-    if is_padded_utf8 {
-        Ok(Zeroizing::new(
+    let bytes = if content_format == DecryptedContentFormat::PaddedUtf8 {
+        Zeroizing::new(
             unpad_bitwarden_bytes(&plaintext)
                 .map_err(|_| CryptoError::DecryptionFailed)?
                 .to_vec(),
-        ))
+        )
     } else {
-        Ok(Zeroizing::new(plaintext))
-    }
+        Zeroizing::new(plaintext)
+    };
+    Ok(DecryptedPayload {
+        bytes,
+        content_format,
+    })
 }
 
-fn cose_content_type_is_padded_utf8(message: &CoseEncrypt0) -> Result<bool, CryptoError> {
+fn cose_protected_content_format(
+    message: &CoseEncrypt0,
+) -> Result<DecryptedContentFormat, CryptoError> {
     match message.protected.header.content_type.as_ref() {
         Some(RegisteredLabel::Text(value)) if value == BITWARDEN_PADDED_UTF8_CONTENT_TYPE => {
-            Ok(true)
+            Ok(DecryptedContentFormat::PaddedUtf8)
+        }
+        Some(RegisteredLabel::Text(value)) if value == BITWARDEN_LEGACY_KEY_CONTENT_TYPE => {
+            Ok(DecryptedContentFormat::BitwardenLegacyKey)
+        }
+        Some(RegisteredLabel::Assigned(iana::CoapContentFormat::Pkcs8)) => {
+            Ok(DecryptedContentFormat::Pkcs8PrivateKey)
+        }
+        Some(RegisteredLabel::Assigned(iana::CoapContentFormat::CoseKey)) => {
+            Ok(DecryptedContentFormat::CoseKey)
         }
         None => Err(CryptoError::InvalidEncryptedString),
         Some(_) => Err(CryptoError::UnsupportedEncryptionType),
     }
 }
 
-fn parse_padded_cose_symmetric_key(
-    padded_key: Zeroizing<Vec<u8>>,
+fn parse_padded_or_raw_cose_symmetric_key(
+    key: Zeroizing<Vec<u8>>,
 ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
-    let key_bytes =
-        unpad_bitwarden_bytes(&padded_key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    if key.len() >= MIN_COSE_ENCODED_KEY_LEN
+        && let Ok(parsed) = parse_padded_cose_symmetric_key(&key)
+    {
+        return Ok(parsed);
+    }
+    parse_raw_cose_symmetric_key(&key)
+}
+
+fn parse_padded_cose_symmetric_key(
+    padded_key: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
+    let key_bytes = unpad_bitwarden_bytes(padded_key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    parse_raw_cose_symmetric_key(key_bytes)
+}
+
+fn parse_raw_cose_symmetric_key(
+    key_bytes: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
     let cose_key = CoseKey::from_slice(key_bytes).map_err(|_| CryptoError::InvalidKeyLength)?;
     extract_xchacha20_poly1305_key_material(cose_key)
 }

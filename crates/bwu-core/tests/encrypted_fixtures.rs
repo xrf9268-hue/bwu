@@ -37,9 +37,18 @@ type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 
 #[derive(Clone, Copy)]
 enum CoseContentTypePlacement {
-    Protected,
+    Protected(CoseFixtureContentFormat),
     Missing,
     UnprotectedOnly,
+}
+
+#[derive(Clone, Copy)]
+enum CoseFixtureContentFormat {
+    PaddedUtf8,
+    Pkcs8PrivateKey,
+    CoseKey,
+    BitwardenLegacyKey,
+    OctetStream,
 }
 
 fn encrypted_fixture_keys() -> VaultKeys {
@@ -89,18 +98,29 @@ fn synthetic_xchacha_key_bytes() -> [u8; 32] {
         .expect("synthetic XChaCha key should be 32 bytes")
 }
 
-fn synthetic_cose_key() -> bwu_core::crypto::SymmetricKey {
-    let key = synthetic_xchacha_key_bytes();
-    let key_id = b"synthetic-cose-key-id".to_vec();
+fn synthetic_inner_xchacha_key_bytes() -> [u8; 32] {
+    (0xb0_u8..=0xcf)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("synthetic inner XChaCha key should be 32 bytes")
+}
+
+fn synthetic_cose_key_bytes_for(key: [u8; 32], key_id: &[u8]) -> Vec<u8> {
     let mut cose_key = CoseKeyBuilder::new_symmetric_key(key.to_vec())
-        .key_id(key_id)
+        .key_id(key_id.to_vec())
         .add_key_op(iana::KeyOperation::Decrypt)
         .add_key_op(iana::KeyOperation::UnwrapKey)
         .build();
     cose_key.alg = Some(Algorithm::PrivateUse(-70_000));
-    let cose_key = cose_key
+    cose_key
         .to_vec()
-        .expect("synthetic COSE key should serialize");
+        .expect("synthetic COSE key should serialize")
+}
+
+fn synthetic_cose_key() -> bwu_core::crypto::SymmetricKey {
+    let key = synthetic_xchacha_key_bytes();
+    let key_id = b"synthetic-cose-key-id";
+    let cose_key = synthetic_cose_key_bytes_for(key, key_id);
     bwu_core::crypto::SymmetricKey::new(pad_cose_key(cose_key))
         .expect("synthetic COSE key should parse")
 }
@@ -116,8 +136,31 @@ fn encrypt_cose_fixture(
         key,
         key_id,
         nonce,
-        CoseContentTypePlacement::Protected,
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::PaddedUtf8),
     )
+}
+
+fn apply_cose_content_format(
+    builder: HeaderBuilder,
+    format: CoseFixtureContentFormat,
+) -> HeaderBuilder {
+    match format {
+        CoseFixtureContentFormat::PaddedUtf8 => {
+            builder.content_type("application/x.bitwarden.utf8-padded".to_owned())
+        }
+        CoseFixtureContentFormat::Pkcs8PrivateKey => {
+            builder.content_format(iana::CoapContentFormat::Pkcs8)
+        }
+        CoseFixtureContentFormat::CoseKey => {
+            builder.content_format(iana::CoapContentFormat::CoseKey)
+        }
+        CoseFixtureContentFormat::BitwardenLegacyKey => {
+            builder.content_type("application/x.bitwarden.legacy-key".to_owned())
+        }
+        CoseFixtureContentFormat::OctetStream => {
+            builder.content_format(iana::CoapContentFormat::OctetStream)
+        }
+    }
 }
 
 fn encrypt_cose_fixture_with_content_type(
@@ -128,17 +171,23 @@ fn encrypt_cose_fixture_with_content_type(
     content_type_placement: CoseContentTypePlacement,
 ) -> String {
     let mut padded_plaintext = plaintext.to_vec();
-    let padding = 32 - (padded_plaintext.len() % 32);
-    padded_plaintext.extend(std::iter::repeat_n(
-        u8::try_from(padding).expect("padding should fit in one byte"),
-        padding,
-    ));
+    if matches!(
+        content_type_placement,
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::PaddedUtf8)
+            | CoseContentTypePlacement::UnprotectedOnly
+    ) {
+        let padding = 32 - (padded_plaintext.len() % 32);
+        padded_plaintext.extend(std::iter::repeat_n(
+            u8::try_from(padding).expect("padding should fit in one byte"),
+            padding,
+        ));
+    }
 
     let mut protected = HeaderBuilder::new()
         .algorithm_label(Algorithm::PrivateUse(-70_000))
         .key_id(key_id.to_vec());
-    if matches!(content_type_placement, CoseContentTypePlacement::Protected) {
-        protected = protected.content_type("application/x.bitwarden.utf8-padded".to_owned());
+    if let CoseContentTypePlacement::Protected(format) = content_type_placement {
+        protected = apply_cose_content_format(protected, format);
     }
 
     let mut unprotected = HeaderBuilder::new().iv(nonce.to_vec());
@@ -146,7 +195,7 @@ fn encrypt_cose_fixture_with_content_type(
         content_type_placement,
         CoseContentTypePlacement::UnprotectedOnly
     ) {
-        unprotected = unprotected.content_type("application/x.bitwarden.utf8-padded".to_owned());
+        unprotected = apply_cose_content_format(unprotected, CoseFixtureContentFormat::PaddedUtf8);
     }
 
     let message = CoseEncrypt0Builder::new()
@@ -405,6 +454,167 @@ fn encrypted_fixtures_unwrap_legacy_rsa_organization_key_shapes() {
                 "legacy RSA organization-key fixture output leaked secret material"
             );
         }
+    }
+}
+
+#[test]
+fn encrypted_fixtures_decrypt_cose_wrapped_pkcs8_private_key_without_secret_leaks() {
+    let (_private_pem, private_der, encrypted_org_key) = rsa_organization_key_fixture();
+    let wrapping_key = synthetic_cose_key();
+    let wrapping_key_bytes = synthetic_xchacha_key_bytes();
+    let encrypted_private_key = encrypt_cose_fixture_with_content_type(
+        &private_der,
+        &wrapping_key_bytes,
+        b"synthetic-cose-key-id",
+        &[0x31; 24],
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::Pkcs8PrivateKey),
+    );
+
+    let private_key = decrypt_private_key(
+        &EncryptedString::parse(&encrypted_private_key)
+            .expect("COSE-wrapped PKCS#8 private key fixture should parse"),
+        &wrapping_key,
+    )
+    .expect("COSE-wrapped PKCS#8 private key bytes should decrypt");
+    let org_key = decrypt_organization_key(
+        &RsaEncryptedString::parse(&encrypted_org_key)
+            .expect("RSA organization key fixture should parse"),
+        &private_key,
+    )
+    .expect("organization key should unwrap through a COSE-wrapped DER private key");
+
+    assert_eq!(org_key, synthetic_org_key());
+
+    let rendered = format!("{private_key:?} {org_key:?}");
+    for secret in [
+        STANDARD.encode(&private_der[..24]),
+        encrypted_private_key,
+        "505152535455565758595a5b5c5d5e5f".to_owned(),
+    ] {
+        assert!(
+            !rendered.contains(&secret),
+            "COSE-wrapped PKCS#8 fixture output leaked secret material"
+        );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_unwrap_cose_key_material_formats_without_secret_leaks() {
+    let wrapping_key = synthetic_cose_key();
+    let wrapping_key_bytes = synthetic_xchacha_key_bytes();
+    let wrapping_key_id = b"synthetic-cose-key-id";
+
+    let legacy_item_key = bwu_core::crypto::SymmetricKey::new((0x30_u8..=0x6f).collect::<Vec<_>>())
+        .expect("legacy item key should parse");
+    let encrypted_legacy_item_key = encrypt_cose_fixture_with_content_type(
+        legacy_item_key.expose_key(),
+        &wrapping_key_bytes,
+        wrapping_key_id,
+        &[0x32; 24],
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::BitwardenLegacyKey),
+    );
+    let legacy_field = encrypt_symmetric_fixture(
+        b"legacy key-material field",
+        &legacy_item_key,
+        b"legacy-cose-iv!!",
+    );
+
+    let inner_cose_key_bytes = synthetic_inner_xchacha_key_bytes();
+    let inner_cose_key_id = b"synthetic-inner-cose-key";
+    let inner_cose_key = synthetic_cose_key_bytes_for(inner_cose_key_bytes, inner_cose_key_id);
+    let encrypted_cose_item_key = encrypt_cose_fixture_with_content_type(
+        &inner_cose_key,
+        &wrapping_key_bytes,
+        wrapping_key_id,
+        &[0x33; 24],
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::CoseKey),
+    );
+    let cose_field = encrypt_cose_fixture(
+        b"COSE key-material field",
+        &inner_cose_key_bytes,
+        inner_cose_key_id,
+        &[0x34; 24],
+    );
+
+    let keys = VaultKeys {
+        account_key: wrapping_key,
+        organization_keys: BTreeMap::new(),
+    };
+    let legacy_item = personal_item(
+        VaultItemType::SecureNote,
+        vec![encrypted_field("secure_note.notes", &legacy_field)],
+    );
+    let legacy_item = EncryptedVaultItem {
+        item_key: Some(
+            EncryptedString::parse(&encrypted_legacy_item_key)
+                .expect("COSE-wrapped legacy item key should parse"),
+        ),
+        ..legacy_item
+    };
+    let cose_item = personal_item(
+        VaultItemType::SecureNote,
+        vec![encrypted_field("secure_note.notes", &cose_field)],
+    );
+    let cose_item = EncryptedVaultItem {
+        item_key: Some(
+            EncryptedString::parse(&encrypted_cose_item_key)
+                .expect("COSE-wrapped COSE item key should parse"),
+        ),
+        ..cose_item
+    };
+
+    let legacy_decrypted = decrypt_vault_item(&legacy_item, &keys)
+        .expect("COSE-wrapped Bitwarden legacy item key should decrypt");
+    let cose_decrypted =
+        decrypt_vault_item(&cose_item, &keys).expect("COSE-wrapped COSE item key should decrypt");
+
+    assert_field(
+        &legacy_decrypted,
+        "secure_note.notes",
+        "legacy key-material field",
+    );
+    assert_field(
+        &cose_decrypted,
+        "secure_note.notes",
+        "COSE key-material field",
+    );
+
+    let unsupported_item_key = encrypt_cose_fixture_with_content_type(
+        legacy_item_key.expose_key(),
+        &wrapping_key_bytes,
+        wrapping_key_id,
+        &[0x35; 24],
+        CoseContentTypePlacement::Protected(CoseFixtureContentFormat::OctetStream),
+    );
+    let unsupported_item = EncryptedVaultItem {
+        item_key: Some(
+            EncryptedString::parse(&unsupported_item_key)
+                .expect("unsupported COSE item key fixture should parse"),
+        ),
+        ..personal_item(
+            VaultItemType::SecureNote,
+            vec![encrypted_field("secure_note.notes", &legacy_field)],
+        )
+    };
+    let err = decrypt_vault_item(&unsupported_item, &keys)
+        .expect_err("unsupported COSE item-key content format should fail closed");
+    assert_eq!(err, CryptoError::UnsupportedEncryptionType);
+
+    let rendered = format!("{legacy_decrypted:?} {cose_decrypted:?} {err:?} {err}");
+    for secret in [
+        "legacy key-material field".to_owned(),
+        "COSE key-material field".to_owned(),
+        "synthetic-cose-key-id".to_owned(),
+        "synthetic-inner-cose-key".to_owned(),
+        STANDARD.encode(&inner_cose_key),
+        encrypted_legacy_item_key,
+        encrypted_cose_item_key,
+        unsupported_item_key,
+    ] {
+        assert!(
+            !rendered.contains(&secret),
+            "COSE-wrapped key-material fixture output leaked synthetic secret material"
+        );
     }
 }
 
