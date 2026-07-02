@@ -12,6 +12,15 @@ use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+use chacha20poly1305::{
+    XChaCha20Poly1305,
+    aead::{AeadInOut, KeyInit},
+};
+use ciborium::Value;
+use coset::{
+    Algorithm as CoseAlgorithm, CborSerializable, CoseEncrypt0, CoseKey, Label, RegisteredLabel,
+    iana,
+};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use openssl::{
@@ -30,14 +39,20 @@ type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 
 const AES_CBC_256_HMAC_SHA256: u8 = 2;
+const COSE_ENCRYPT0: u8 = 7;
 const RSA_2048_OAEP_SHA256: u8 = 3;
 const RSA_2048_OAEP_SHA1: u8 = 4;
 const RSA_2048_OAEP_SHA256_HMAC_SHA256: u8 = 5;
 const RSA_2048_OAEP_SHA1_HMAC_SHA256: u8 = 6;
+const XCHACHA20_POLY1305: i64 = -70_000;
 const AES_KEY_LEN: usize = 32;
 const SYMMETRIC_HMAC_KEY_LEN: usize = 64;
 const AES_BLOCK_LEN: usize = 16;
 const HMAC_SHA256_LEN: usize = 32;
+const XCHACHA20_POLY1305_KEY_LEN: usize = 32;
+const XCHACHA20_POLY1305_NONCE_LEN: usize = 24;
+const MIN_COSE_ENCODED_KEY_LEN: usize = SYMMETRIC_HMAC_KEY_LEN + 1;
+const BITWARDEN_PADDED_UTF8_CONTENT_TYPE: &str = "application/x.bitwarden.utf8-padded";
 const PBKDF2_PRELOGIN_MIN_ITERATIONS: u32 = 5_000;
 const PBKDF2_PRELOGIN_MAX_ITERATIONS: u32 = 2_000_000;
 const ARGON2ID_PRELOGIN_MIN_ITERATIONS: u32 = 2;
@@ -199,15 +214,32 @@ mod tests {
 /// Zeroizing symmetric key material.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SymmetricKey {
-    key: Zeroizing<Vec<u8>>,
+    material: SymmetricKeyMaterial,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum SymmetricKeyMaterial {
+    Legacy(Zeroizing<Vec<u8>>),
+    XChaCha20Poly1305 {
+        key: Zeroizing<Vec<u8>>,
+        key_id: Vec<u8>,
+    },
 }
 
 impl SymmetricKey {
     /// Wraps raw Bitwarden symmetric key bytes.
     pub fn new(key: impl Into<Vec<u8>>) -> Result<Self, CryptoError> {
-        let key = Zeroizing::new(key.into());
+        let key = key.into();
         match key.len() {
-            AES_KEY_LEN | SYMMETRIC_HMAC_KEY_LEN => Ok(Self { key }),
+            AES_KEY_LEN | SYMMETRIC_HMAC_KEY_LEN => Ok(Self {
+                material: SymmetricKeyMaterial::Legacy(Zeroizing::new(key)),
+            }),
+            MIN_COSE_ENCODED_KEY_LEN.. => {
+                let (key, key_id) = parse_padded_cose_symmetric_key(&key)?;
+                Ok(Self {
+                    material: SymmetricKeyMaterial::XChaCha20Poly1305 { key, key_id },
+                })
+            }
             _ => Err(CryptoError::InvalidKeyLength),
         }
     }
@@ -215,14 +247,33 @@ impl SymmetricKey {
     /// Exposes key bytes to deliberate crypto call sites.
     #[must_use]
     pub fn expose_key(&self) -> &[u8] {
-        &self.key
+        match &self.material {
+            SymmetricKeyMaterial::Legacy(key) => key,
+            SymmetricKeyMaterial::XChaCha20Poly1305 { key, .. } => key,
+        }
     }
 
     fn aes_hmac_parts(&self) -> Result<(&[u8], &[u8]), CryptoError> {
-        if self.key.len() != SYMMETRIC_HMAC_KEY_LEN {
-            return Err(CryptoError::InvalidKeyLength);
+        match &self.material {
+            SymmetricKeyMaterial::Legacy(key) if key.len() == SYMMETRIC_HMAC_KEY_LEN => {
+                Ok(key.split_at(AES_KEY_LEN))
+            }
+            SymmetricKeyMaterial::Legacy(_) | SymmetricKeyMaterial::XChaCha20Poly1305 { .. } => {
+                Err(CryptoError::InvalidKeyLength)
+            }
         }
-        Ok(self.key.split_at(AES_KEY_LEN))
+    }
+
+    fn xchacha20_poly1305_parts(&self) -> Result<(&[u8], &[u8]), CryptoError> {
+        match &self.material {
+            SymmetricKeyMaterial::XChaCha20Poly1305 { key, key_id } => {
+                if key.len() != XCHACHA20_POLY1305_KEY_LEN {
+                    return Err(CryptoError::InvalidKeyLength);
+                }
+                Ok((key, key_id))
+            }
+            SymmetricKeyMaterial::Legacy(_) => Err(CryptoError::InvalidKeyLength),
+        }
     }
 }
 
@@ -239,6 +290,22 @@ impl fmt::Debug for SymmetricKey {
 #[derive(Clone, Eq, PartialEq)]
 pub struct EncryptedString {
     encryption_type: u8,
+    payload: EncryptedStringPayload,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum EncryptedStringPayload {
+    AesCbcHmac {
+        iv: Vec<u8>,
+        data: Vec<u8>,
+        mac: Vec<u8>,
+    },
+    CoseEncrypt0 {
+        data: Vec<u8>,
+    },
+}
+
+struct ParsedAesCbcHmacString {
     iv: Vec<u8>,
     data: Vec<u8>,
     mac: Vec<u8>,
@@ -257,40 +324,32 @@ impl EncryptedString {
         let encryption_type = prefix
             .parse::<u8>()
             .map_err(|_| CryptoError::InvalidEncryptedString)?;
-        if encryption_type != AES_CBC_256_HMAC_SHA256 {
-            return Err(CryptoError::UnsupportedEncryptionType);
-        }
 
-        let mut pieces = payload.split('|');
-        let iv = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
-        let data = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
-        let mac = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
-        if pieces.next().is_some() {
-            return Err(CryptoError::InvalidEncryptedString);
-        }
-
-        let iv = STANDARD
-            .decode(iv)
-            .map_err(|_| CryptoError::InvalidBase64)?;
-        let data = STANDARD
-            .decode(data)
-            .map_err(|_| CryptoError::InvalidBase64)?;
-        let mac = STANDARD
-            .decode(mac)
-            .map_err(|_| CryptoError::InvalidBase64)?;
-
-        if iv.len() != AES_BLOCK_LEN {
-            return Err(CryptoError::InvalidIvLength);
-        }
-        if mac.len() != HMAC_SHA256_LEN || data.is_empty() || data.len() % AES_BLOCK_LEN != 0 {
-            return Err(CryptoError::InvalidEncryptedString);
-        }
+        let payload = match encryption_type {
+            AES_CBC_256_HMAC_SHA256 => {
+                let parsed = parse_aes_cbc_hmac_payload(payload)?;
+                EncryptedStringPayload::AesCbcHmac {
+                    iv: parsed.iv,
+                    data: parsed.data,
+                    mac: parsed.mac,
+                }
+            }
+            COSE_ENCRYPT0 => {
+                if payload.contains('|') || payload.is_empty() {
+                    return Err(CryptoError::InvalidEncryptedString);
+                }
+                let data = STANDARD
+                    .decode(payload)
+                    .map_err(|_| CryptoError::InvalidBase64)?;
+                CoseEncrypt0::from_slice(&data).map_err(|_| CryptoError::InvalidEncryptedString)?;
+                EncryptedStringPayload::CoseEncrypt0 { data }
+            }
+            _ => return Err(CryptoError::UnsupportedEncryptionType),
+        };
 
         Ok(Self {
             encryption_type,
-            iv,
-            data,
-            mac,
+            payload,
         })
     }
 
@@ -664,22 +723,171 @@ fn decrypt_bytes(
     encrypted: &EncryptedString,
     key: &SymmetricKey,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    if encrypted.encryption_type != AES_CBC_256_HMAC_SHA256 {
+    match &encrypted.payload {
+        EncryptedStringPayload::AesCbcHmac { iv, data, mac } => {
+            let (enc_key, mac_key) = key.aes_hmac_parts()?;
+
+            let mut hmac =
+                HmacSha256::new_from_slice(mac_key).map_err(|_| CryptoError::InvalidKeyLength)?;
+            hmac.update(iv);
+            hmac.update(data);
+            hmac.verify_slice(mac)
+                .map_err(|_| CryptoError::AuthenticationFailed)?;
+
+            let decryptor = Aes256CbcDecryptor::new_from_slices(enc_key, iv)
+                .map_err(|_| CryptoError::InvalidIvLength)?;
+            let plaintext = decryptor
+                .decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|_| CryptoError::DecryptionFailed)?;
+            Ok(Zeroizing::new(plaintext))
+        }
+        EncryptedStringPayload::CoseEncrypt0 { data } => decrypt_cose_encrypt0_bytes(data, key),
+    }
+}
+
+fn parse_aes_cbc_hmac_payload(payload: &str) -> Result<ParsedAesCbcHmacString, CryptoError> {
+    let mut pieces = payload.split('|');
+    let iv = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
+    let data = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
+    let mac = pieces.next().ok_or(CryptoError::InvalidEncryptedString)?;
+    if pieces.next().is_some() {
+        return Err(CryptoError::InvalidEncryptedString);
+    }
+
+    let iv = STANDARD
+        .decode(iv)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+    let data = STANDARD
+        .decode(data)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+    let mac = STANDARD
+        .decode(mac)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+
+    if iv.len() != AES_BLOCK_LEN {
+        return Err(CryptoError::InvalidIvLength);
+    }
+    if mac.len() != HMAC_SHA256_LEN || data.is_empty() || data.len() % AES_BLOCK_LEN != 0 {
+        return Err(CryptoError::InvalidEncryptedString);
+    }
+
+    Ok(ParsedAesCbcHmacString { iv, data, mac })
+}
+
+fn decrypt_cose_encrypt0_bytes(
+    data: &[u8],
+    key: &SymmetricKey,
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let message =
+        CoseEncrypt0::from_slice(data).map_err(|_| CryptoError::InvalidEncryptedString)?;
+    if message.protected.header.alg != Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305)) {
         return Err(CryptoError::UnsupportedEncryptionType);
     }
-    let (enc_key, mac_key) = key.aes_hmac_parts()?;
 
-    let mut hmac =
-        HmacSha256::new_from_slice(mac_key).map_err(|_| CryptoError::InvalidKeyLength)?;
-    hmac.update(&encrypted.iv);
-    hmac.update(&encrypted.data);
-    hmac.verify_slice(&encrypted.mac)
-        .map_err(|_| CryptoError::AuthenticationFailed)?;
-
-    let decryptor = Aes256CbcDecryptor::new_from_slices(enc_key, &encrypted.iv)
+    let (xchacha_key, key_id) = key.xchacha20_poly1305_parts()?;
+    if message.protected.header.key_id.is_empty() || message.protected.header.key_id != key_id {
+        return Err(CryptoError::AuthenticationFailed);
+    }
+    let nonce: &[u8; XCHACHA20_POLY1305_NONCE_LEN] = message
+        .unprotected
+        .iv
+        .as_slice()
+        .try_into()
         .map_err(|_| CryptoError::InvalidIvLength)?;
-    let plaintext = decryptor
-        .decrypt_padded_vec_mut::<Pkcs7>(&encrypted.data)
-        .map_err(|_| CryptoError::DecryptionFailed)?;
-    Ok(Zeroizing::new(plaintext))
+    let cipher_key: &[u8; XCHACHA20_POLY1305_KEY_LEN] = xchacha_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+
+    let is_padded_utf8 = cose_content_type_is_padded_utf8(&message)?;
+    let plaintext = message.decrypt_ciphertext(
+        &[],
+        || CryptoError::InvalidEncryptedString,
+        |ciphertext, aad| {
+            let mut buffer = ciphertext.to_vec();
+            XChaCha20Poly1305::new(cipher_key.into())
+                .decrypt_in_place(nonce.into(), aad, &mut buffer)
+                .map_err(|_| CryptoError::AuthenticationFailed)?;
+            Ok(buffer)
+        },
+    )?;
+
+    if is_padded_utf8 {
+        Ok(Zeroizing::new(
+            unpad_bitwarden_bytes(&plaintext)
+                .map_err(|_| CryptoError::DecryptionFailed)?
+                .to_vec(),
+        ))
+    } else {
+        Ok(Zeroizing::new(plaintext))
+    }
+}
+
+fn cose_content_type_is_padded_utf8(message: &CoseEncrypt0) -> Result<bool, CryptoError> {
+    let content_type = message
+        .protected
+        .header
+        .content_type
+        .as_ref()
+        .or(message.unprotected.content_type.as_ref());
+
+    match content_type {
+        Some(RegisteredLabel::Text(value)) if value == BITWARDEN_PADDED_UTF8_CONTENT_TYPE => {
+            Ok(true)
+        }
+        None => Ok(false),
+        Some(_) => Err(CryptoError::UnsupportedEncryptionType),
+    }
+}
+
+fn parse_padded_cose_symmetric_key(
+    padded_key: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
+    let key_bytes = unpad_bitwarden_bytes(padded_key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let cose_key = CoseKey::from_slice(key_bytes).map_err(|_| CryptoError::InvalidKeyLength)?;
+    if cose_key.kty != RegisteredLabel::Assigned(iana::KeyType::Symmetric)
+        || cose_key.alg != Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305))
+        || cose_key.key_id.is_empty()
+    {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    if !cose_key.key_ops.is_empty()
+        && !cose_key
+            .key_ops
+            .contains(&RegisteredLabel::Assigned(iana::KeyOperation::Decrypt))
+    {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+
+    let key = cose_key
+        .params
+        .iter()
+        .find_map(|(label, value)| match (label, value) {
+            (Label::Int(label), Value::Bytes(bytes))
+                if *label == iana::SymmetricKeyParameter::K as i64 =>
+            {
+                Some(bytes)
+            }
+            _ => None,
+        })
+        .ok_or(CryptoError::InvalidKeyLength)?;
+    if key.len() != XCHACHA20_POLY1305_KEY_LEN {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+
+    Ok((Zeroizing::new(key.clone()), cose_key.key_id))
+}
+
+fn unpad_bitwarden_bytes(padded: &[u8]) -> Result<&[u8], CryptoError> {
+    let padding_len = usize::from(*padded.last().ok_or(CryptoError::InvalidEncryptedString)?);
+    if padding_len == 0 || padding_len > padded.len() {
+        return Err(CryptoError::InvalidEncryptedString);
+    }
+    let unpadded_len = padded.len() - padding_len;
+    if !padded[unpadded_len..]
+        .iter()
+        .all(|byte| usize::from(*byte) == padding_len)
+    {
+        return Err(CryptoError::InvalidEncryptedString);
+    }
+    Ok(&padded[..unpadded_len])
 }

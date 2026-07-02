@@ -12,6 +12,13 @@ use bwu_core::{
     redaction::SecretString,
 };
 use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use chacha20poly1305::{
+    XChaCha20Poly1305,
+    aead::{AeadInOut, KeyInit},
+};
+use coset::{
+    Algorithm, CborSerializable, CoseEncrypt0Builder, CoseKeyBuilder, HeaderBuilder, iana,
+};
 use hmac::{Hmac, Mac};
 use openssl::{
     md::{Md, MdRef},
@@ -55,6 +62,81 @@ fn encrypted_fixture_keys() -> VaultKeys {
 fn synthetic_org_key() -> bwu_core::crypto::SymmetricKey {
     bwu_core::crypto::SymmetricKey::new((0x50_u8..=0x8f).collect::<Vec<_>>())
         .expect("synthetic organization key should be valid")
+}
+
+fn pad_cose_key(mut encoded_key: Vec<u8>) -> Vec<u8> {
+    let padding = 65_usize.saturating_sub(encoded_key.len()).max(1);
+    assert!(padding <= u8::MAX as usize);
+    let padded_len = encoded_key.len().saturating_add(padding).max(65);
+    encoded_key.resize(
+        padded_len,
+        u8::try_from(padding).expect("padding should fit in one byte"),
+    );
+    encoded_key
+}
+
+fn synthetic_xchacha_key_bytes() -> [u8; 32] {
+    (0x90_u8..=0xaf)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("synthetic XChaCha key should be 32 bytes")
+}
+
+fn synthetic_cose_key() -> bwu_core::crypto::SymmetricKey {
+    let key = synthetic_xchacha_key_bytes();
+    let key_id = b"synthetic-cose-key-id".to_vec();
+    let mut cose_key = CoseKeyBuilder::new_symmetric_key(key.to_vec())
+        .key_id(key_id)
+        .add_key_op(iana::KeyOperation::Decrypt)
+        .add_key_op(iana::KeyOperation::UnwrapKey)
+        .build();
+    cose_key.alg = Some(Algorithm::PrivateUse(-70_000));
+    let cose_key = cose_key
+        .to_vec()
+        .expect("synthetic COSE key should serialize");
+    bwu_core::crypto::SymmetricKey::new(pad_cose_key(cose_key))
+        .expect("synthetic COSE key should parse")
+}
+
+fn encrypt_cose_fixture(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    key_id: &[u8],
+    nonce: &[u8; 24],
+) -> String {
+    let mut padded_plaintext = plaintext.to_vec();
+    let padding = 32 - (padded_plaintext.len() % 32);
+    padded_plaintext.extend(std::iter::repeat_n(
+        u8::try_from(padding).expect("padding should fit in one byte"),
+        padding,
+    ));
+
+    let message = CoseEncrypt0Builder::new()
+        .protected(
+            HeaderBuilder::new()
+                .algorithm_label(Algorithm::PrivateUse(-70_000))
+                .key_id(key_id.to_vec())
+                .content_type("application/x.bitwarden.utf8-padded".to_owned())
+                .build(),
+        )
+        .create_ciphertext(&padded_plaintext, &[], |data, aad| {
+            let mut buffer = data.to_vec();
+            XChaCha20Poly1305::new(key.into())
+                .encrypt_in_place(nonce.into(), aad, &mut buffer)
+                .expect("synthetic COSE fixture should encrypt");
+            buffer
+        })
+        .unprotected(HeaderBuilder::new().iv(nonce.to_vec()).build())
+        .build();
+
+    format!(
+        "7.{}",
+        STANDARD.encode(
+            message
+                .to_vec()
+                .expect("synthetic COSE Encrypt0 should serialize")
+        )
+    )
 }
 
 fn encrypt_symmetric_fixture(
@@ -152,6 +234,15 @@ fn org_item(item_type: VaultItemType, fields: Vec<EncryptedField>) -> EncryptedV
 fn personal_item(item_type: VaultItemType, fields: Vec<EncryptedField>) -> EncryptedVaultItem {
     EncryptedVaultItem {
         item_type,
+        organization_id: None,
+        item_key: None,
+        fields,
+    }
+}
+
+fn cose_item(fields: Vec<EncryptedField>) -> EncryptedVaultItem {
+    EncryptedVaultItem {
+        item_type: VaultItemType::SecureNote,
         organization_id: None,
         item_key: None,
         fields,
@@ -414,6 +505,66 @@ fn encrypted_fixtures_decrypt_supported_read_only_item_shapes() {
         assert!(
             !rendered.contains(secret),
             "debug output for decrypted fixtures leaked a decrypted secret"
+        );
+    }
+}
+
+#[test]
+fn encrypted_fixtures_decrypt_current_cose_field_without_secret_leaks() {
+    let key_bytes = synthetic_xchacha_key_bytes();
+    let key_id = b"synthetic-cose-key-id";
+    let keys = VaultKeys {
+        account_key: synthetic_cose_key(),
+        organization_keys: BTreeMap::new(),
+    };
+    let encrypted_note = encrypt_cose_fixture(
+        b"synthetic current COSE note",
+        &key_bytes,
+        key_id,
+        b"cose-note-fixture-nonce!",
+    );
+    let tampered_note = {
+        let (_, payload) = encrypted_note
+            .split_once('.')
+            .expect("type prefix should exist");
+        let mut bytes = STANDARD
+            .decode(payload)
+            .expect("COSE fixture should decode");
+        let last = bytes
+            .last_mut()
+            .expect("COSE fixture should contain ciphertext");
+        *last ^= 0x01;
+        format!("7.{}", STANDARD.encode(bytes))
+    };
+
+    let decrypted = decrypt_vault_item(
+        &cose_item(vec![encrypted_field("secure_note.notes", &encrypted_note)]),
+        &keys,
+    )
+    .expect("type 7 COSE fields should decrypt through the XChaCha key");
+    assert_field(
+        &decrypted,
+        "secure_note.notes",
+        "synthetic current COSE note",
+    );
+
+    let err = decrypt_vault_item(
+        &cose_item(vec![encrypted_field("secure_note.notes", &tampered_note)]),
+        &keys,
+    )
+    .expect_err("tampered COSE ciphertext should fail authentication");
+    assert_eq!(err, CryptoError::AuthenticationFailed);
+
+    let rendered = format!("{decrypted:?} {err:?} {err}");
+    for secret in [
+        "synthetic current COSE note",
+        "synthetic-cose-key-id",
+        "kJGSk5SVlpeYmZqbnJ2en6ChoqOkpaav",
+        encrypted_note.as_str(),
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "COSE fixture output leaked synthetic secret material"
         );
     }
 }
