@@ -173,7 +173,12 @@ impl KdfConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{CryptoError, KdfConfig};
+    use coset::{Algorithm as CoseAlgorithm, CoseKeyBuilder, iana};
+    use zeroize::Zeroizing;
+
+    use super::{
+        CryptoError, KdfConfig, XCHACHA20_POLY1305, extract_xchacha20_poly1305_key_material,
+    };
 
     #[test]
     fn argon2id_prelogin_validation_rejects_oversized_metadata_before_hashing() {
@@ -209,6 +214,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn cose_symmetric_key_extraction_moves_key_bytes_into_zeroizing() {
+        let raw_key = (0x90_u8..=0xaf).collect::<Vec<_>>();
+        let key_id = b"synthetic-cose-key-id".to_vec();
+        let mut cose_key = CoseKeyBuilder::new_symmetric_key(raw_key.clone())
+            .key_id(key_id.clone())
+            .add_key_op(iana::KeyOperation::Decrypt)
+            .build();
+        cose_key.alg = Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305));
+
+        let (key, parsed_key_id) = extract_xchacha20_poly1305_key_material(cose_key)
+            .expect("valid COSE symmetric key should extract");
+
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+        assert_zeroizing(&key);
+        assert_eq!(&*key, raw_key.as_slice());
+        assert_eq!(parsed_key_id, key_id);
+    }
 }
 
 /// Zeroizing symmetric key material.
@@ -229,13 +253,13 @@ enum SymmetricKeyMaterial {
 impl SymmetricKey {
     /// Wraps raw Bitwarden symmetric key bytes.
     pub fn new(key: impl Into<Vec<u8>>) -> Result<Self, CryptoError> {
-        let key = key.into();
+        let key = Zeroizing::new(key.into());
         match key.len() {
             AES_KEY_LEN | SYMMETRIC_HMAC_KEY_LEN => Ok(Self {
-                material: SymmetricKeyMaterial::Legacy(Zeroizing::new(key)),
+                material: SymmetricKeyMaterial::Legacy(key),
             }),
             MIN_COSE_ENCODED_KEY_LEN.. => {
-                let (key, key_id) = parse_padded_cose_symmetric_key(&key)?;
+                let (key, key_id) = parse_padded_cose_symmetric_key(key)?;
                 Ok(Self {
                     material: SymmetricKeyMaterial::XChaCha20Poly1305 { key, key_id },
                 })
@@ -833,41 +857,54 @@ fn cose_content_type_is_padded_utf8(message: &CoseEncrypt0) -> Result<bool, Cryp
 }
 
 fn parse_padded_cose_symmetric_key(
-    padded_key: &[u8],
+    padded_key: Zeroizing<Vec<u8>>,
 ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
-    let key_bytes = unpad_bitwarden_bytes(padded_key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let key_bytes =
+        unpad_bitwarden_bytes(&padded_key).map_err(|_| CryptoError::InvalidKeyLength)?;
     let cose_key = CoseKey::from_slice(key_bytes).map_err(|_| CryptoError::InvalidKeyLength)?;
-    if cose_key.kty != RegisteredLabel::Assigned(iana::KeyType::Symmetric)
-        || cose_key.alg != Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305))
-        || cose_key.key_id.is_empty()
-    {
-        return Err(CryptoError::InvalidKeyLength);
-    }
-    if !cose_key.key_ops.is_empty()
-        && !cose_key
-            .key_ops
-            .contains(&RegisteredLabel::Assigned(iana::KeyOperation::Decrypt))
-    {
-        return Err(CryptoError::InvalidKeyLength);
-    }
+    extract_xchacha20_poly1305_key_material(cose_key)
+}
 
-    let key = cose_key
-        .params
-        .iter()
+fn extract_xchacha20_poly1305_key_material(
+    cose_key: CoseKey,
+) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), CryptoError> {
+    let CoseKey {
+        kty,
+        key_id,
+        alg,
+        key_ops,
+        params,
+        ..
+    } = cose_key;
+    // Move the raw COSE key parameter into Zeroizing before metadata validation
+    // so malformed-key error paths do not drop the decoded key bytes normally.
+    let key = params
+        .into_iter()
         .find_map(|(label, value)| match (label, value) {
             (Label::Int(label), Value::Bytes(bytes))
-                if *label == iana::SymmetricKeyParameter::K as i64 =>
+                if label == iana::SymmetricKeyParameter::K as i64 =>
             {
-                Some(bytes)
+                Some(Zeroizing::new(bytes))
             }
             _ => None,
         })
         .ok_or(CryptoError::InvalidKeyLength)?;
+    if kty != RegisteredLabel::Assigned(iana::KeyType::Symmetric)
+        || alg != Some(CoseAlgorithm::PrivateUse(XCHACHA20_POLY1305))
+        || key_id.is_empty()
+    {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    if !key_ops.is_empty()
+        && !key_ops.contains(&RegisteredLabel::Assigned(iana::KeyOperation::Decrypt))
+    {
+        return Err(CryptoError::InvalidKeyLength);
+    }
     if key.len() != XCHACHA20_POLY1305_KEY_LEN {
         return Err(CryptoError::InvalidKeyLength);
     }
 
-    Ok((Zeroizing::new(key.clone()), cose_key.key_id))
+    Ok((key, key_id))
 }
 
 fn unpad_bitwarden_bytes(padded: &[u8]) -> Result<&[u8], CryptoError> {
