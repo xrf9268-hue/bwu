@@ -3,10 +3,14 @@
 //! This module intentionally stops at encrypted/auth response envelopes. Later
 //! milestones own key derivation, vault decryption, and command integration.
 
-use std::{fmt, ops::Deref};
+use std::{collections::BTreeMap, fmt, ops::Deref};
 
 use reqwest::{StatusCode, blocking::Response};
-use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned, ser::SerializeStruct};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, DeserializeOwned},
+    ser::SerializeStruct,
+};
 use serde_json::Value;
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -283,7 +287,7 @@ impl fmt::Debug for Device {
 }
 
 /// Bitwarden two-step login provider identifiers accepted by Identity token requests.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub enum TwoFactorProvider {
     /// Authenticator app code.
     Authenticator,
@@ -301,6 +305,8 @@ pub enum TwoFactorProvider {
     WebAuthn,
     /// Account recovery code.
     RecoveryCode,
+    /// Provider identifier returned by the server before this client models it.
+    Unknown(u8),
 }
 
 impl TwoFactorProvider {
@@ -314,6 +320,21 @@ impl TwoFactorProvider {
             Self::OrganizationDuo => 6,
             Self::WebAuthn => 7,
             Self::RecoveryCode => 8,
+            Self::Unknown(provider) => provider,
+        }
+    }
+
+    fn from_protocol_id(provider: u8) -> Self {
+        match provider {
+            0 => Self::Authenticator,
+            1 => Self::Email,
+            2 => Self::Duo,
+            3 => Self::YubiKey,
+            5 => Self::Remember,
+            6 => Self::OrganizationDuo,
+            7 => Self::WebAuthn,
+            8 => Self::RecoveryCode,
+            other => Self::Unknown(other),
         }
     }
 }
@@ -347,6 +368,178 @@ impl fmt::Debug for TwoFactorToken {
             .field("remember", &self.remember)
             .finish()
     }
+}
+
+/// Two-step login challenge returned by Bitwarden Identity during token exchange.
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct TwoFactorChallenge {
+    /// Backward-compatible provider id list from the Identity response.
+    #[serde(
+        rename = "TwoFactorProviders",
+        default,
+        deserialize_with = "deserialize_provider_list"
+    )]
+    providers: Vec<TwoFactorProvider>,
+    /// Provider-specific challenge data keyed by Bitwarden provider id.
+    #[serde(
+        rename = "TwoFactorProviders2",
+        default,
+        deserialize_with = "deserialize_provider_data"
+    )]
+    provider_data: BTreeMap<TwoFactorProvider, TwoFactorProviderChallenge>,
+    /// Session token used by email two-step login resend flows.
+    #[serde(rename = "SsoEmail2faSessionToken")]
+    sso_email_2fa_session_token: Option<SecretString>,
+    /// Account email returned for some two-step login flows.
+    #[serde(rename = "Email")]
+    email: Option<String>,
+    /// Password policy envelope returned alongside some challenge responses.
+    #[serde(rename = "MasterPasswordPolicy")]
+    master_password_policy: Option<Value>,
+}
+
+impl TwoFactorChallenge {
+    /// Provider ids returned by the legacy `TwoFactorProviders` field.
+    #[must_use]
+    pub fn providers(&self) -> &[TwoFactorProvider] {
+        &self.providers
+    }
+
+    /// Provider-specific challenge data for a supported provider.
+    #[must_use]
+    pub fn provider_data(
+        &self,
+        provider: TwoFactorProvider,
+    ) -> Option<&TwoFactorProviderChallenge> {
+        self.provider_data.get(&provider)
+    }
+
+    /// Email resend session token, when the server includes one.
+    #[must_use]
+    pub fn sso_email_2fa_session_token(&self) -> Option<&SecretString> {
+        self.sso_email_2fa_session_token.as_ref()
+    }
+
+    /// Account email returned by the challenge response.
+    #[must_use]
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+
+    /// Master password policy envelope returned with the challenge, if present.
+    #[must_use]
+    pub fn master_password_policy(&self) -> Option<&Value> {
+        self.master_password_policy.as_ref()
+    }
+
+    fn has_provider_data(&self) -> bool {
+        !self.provider_data.is_empty()
+    }
+}
+
+impl fmt::Debug for TwoFactorChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let provider_field_names = self
+            .provider_data
+            .iter()
+            .map(|(provider, data)| (*provider, data.field_names()))
+            .collect::<BTreeMap<_, _>>();
+
+        formatter
+            .debug_struct("TwoFactorChallenge")
+            .field("providers", &self.providers)
+            .field("provider_data_fields", &provider_field_names)
+            .field(
+                "sso_email_2fa_session_token",
+                &self.sso_email_2fa_session_token,
+            )
+            .field("email", &self.email.as_ref().map(|_| "<redacted>"))
+            .field(
+                "master_password_policy",
+                &self.master_password_policy.as_ref().map(|_| "<present>"),
+            )
+            .finish()
+    }
+}
+
+/// Provider-specific two-step login challenge fields.
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct TwoFactorProviderChallenge {
+    #[serde(flatten)]
+    fields: BTreeMap<String, Value>,
+}
+
+impl TwoFactorProviderChallenge {
+    /// Reads a provider-specific challenge field.
+    #[must_use]
+    pub fn get(&self, field: &str) -> Option<&Value> {
+        self.fields.get(field)
+    }
+
+    fn field_names(&self) -> Vec<&str> {
+        self.fields.keys().map(String::as_str).collect()
+    }
+}
+
+impl fmt::Debug for TwoFactorProviderChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TwoFactorProviderChallenge")
+            .field("fields", &self.field_names())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProtocolProviderId {
+    Number(u8),
+    String(String),
+}
+
+impl ProtocolProviderId {
+    fn into_provider<E>(self) -> Result<TwoFactorProvider, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::Number(provider) => Ok(TwoFactorProvider::from_protocol_id(provider)),
+            Self::String(provider) => provider
+                .parse::<u8>()
+                .map(TwoFactorProvider::from_protocol_id)
+                .map_err(|source| E::custom(format!("invalid two-factor provider id: {source}"))),
+        }
+    }
+}
+
+fn deserialize_provider_list<'de, D>(deserializer: D) -> Result<Vec<TwoFactorProvider>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<ProtocolProviderId>::deserialize(deserializer)?
+        .into_iter()
+        .map(ProtocolProviderId::into_provider)
+        .collect()
+}
+
+fn deserialize_provider_data<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<TwoFactorProvider, TwoFactorProviderChallenge>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    BTreeMap::<String, TwoFactorProviderChallenge>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(provider, data)| {
+            provider
+                .parse::<u8>()
+                .map(TwoFactorProvider::from_protocol_id)
+                .map(|provider| (provider, data))
+                .map_err(|source| {
+                    de::Error::custom(format!("invalid two-factor provider id: {source}"))
+                })
+        })
+        .collect()
 }
 
 /// Password grant token request boundary.
@@ -872,7 +1065,7 @@ impl ApiClient {
             .form(form)
             .send()
             .map_err(|source| ApiClientError::transport("POST", &url, source))?;
-        parse_json_response("POST", &url, response)
+        parse_token_response("POST", &url, response)
     }
 }
 
@@ -890,6 +1083,13 @@ pub enum ApiClientError {
         method: &'static str,
         path: String,
         status: StatusCode,
+    },
+    /// Token exchange returned a two-step login challenge.
+    TwoFactorRequired {
+        method: &'static str,
+        path: String,
+        status: StatusCode,
+        challenge: Box<TwoFactorChallenge>,
     },
     /// Response body could not be decoded as the expected JSON envelope.
     Decode {
@@ -923,6 +1123,20 @@ impl ApiClientError {
             status,
         }
     }
+
+    fn two_factor_required(
+        method: &'static str,
+        url: &Url,
+        status: StatusCode,
+        challenge: TwoFactorChallenge,
+    ) -> Self {
+        Self::TwoFactorRequired {
+            method,
+            path: redacted_path(url),
+            status,
+            challenge: Box::new(challenge),
+        }
+    }
 }
 
 impl fmt::Display for ApiClientError {
@@ -939,6 +1153,15 @@ impl fmt::Display for ApiClientError {
                 path,
                 status,
             } => write!(formatter, "{method} {path} returned HTTP {status}"),
+            Self::TwoFactorRequired {
+                method,
+                path,
+                status,
+                ..
+            } => write!(
+                formatter,
+                "{method} {path} returned HTTP {status} with a two-factor challenge"
+            ),
             Self::Decode { method, path, .. } => {
                 write!(
                     formatter,
@@ -953,9 +1176,33 @@ impl std::error::Error for ApiClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport { source, .. } | Self::Decode { source, .. } => Some(source),
-            Self::Status { .. } => None,
+            Self::Status { .. } | Self::TwoFactorRequired { .. } => None,
         }
     }
+}
+
+fn parse_token_response(
+    method: &'static str,
+    url: &Url,
+    response: Response,
+) -> Result<TokenResponse, ApiClientError> {
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json::<TokenResponse>()
+            .map_err(|source| ApiClientError::decode(method, url, source));
+    }
+
+    if status == StatusCode::BAD_REQUEST
+        && let Ok(challenge) = response.json::<TwoFactorChallenge>()
+        && challenge.has_provider_data()
+    {
+        return Err(ApiClientError::two_factor_required(
+            method, url, status, challenge,
+        ));
+    }
+
+    Err(ApiClientError::status(method, url, status))
 }
 
 fn parse_json_response<T>(

@@ -1,8 +1,10 @@
 use bwu_core::api::{
-    ApiClient, ApiKeyTokenRequest, Device, EndpointConfig, PasswordTokenRequest, PreloginRequest,
-    RefreshTokenRequest, SecretString, TokenResponse, TwoFactorProvider, TwoFactorToken,
+    ApiClient, ApiClientError, ApiKeyTokenRequest, Device, EndpointConfig, PasswordTokenRequest,
+    PreloginRequest, RefreshTokenRequest, SecretString, TokenResponse, TwoFactorProvider,
+    TwoFactorToken,
 };
 use mockito::{Matcher, Server};
+use reqwest::StatusCode;
 
 #[test]
 fn secret_string_has_zeroizing_drop_contract() {
@@ -310,6 +312,91 @@ fn password_token_request_serializes_two_factor_retry_fields_and_redacts_token()
         .expect("two-factor password token response should parse");
 
     assert_eq!(response.access_token.as_str(), "synthetic-access-token");
+}
+
+#[test]
+fn password_token_exchange_preserves_two_factor_challenge_error_and_redacts_material() {
+    let mut server = Server::new();
+    let endpoint = EndpointConfig::self_hosted(server.url()).expect("mock server URL is valid");
+    let _token_mock = server
+        .mock("POST", "/identity/connect/token")
+        .match_body(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("grant_type".to_owned(), "password".to_owned()),
+            Matcher::UrlEncoded("client_id".to_owned(), "synthetic-client-id".to_owned()),
+            Matcher::UrlEncoded("username".to_owned(), "user@example.test".to_owned()),
+            Matcher::UrlEncoded("password".to_owned(), "synthetic-master-hash".to_owned()),
+        ]))
+        .with_status(400)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "TwoFactorProviders":["1","2"],
+                "TwoFactorProviders2":{
+                    "1":{"Email":"u***@example.test"},
+                    "2":{
+                        "Host":"synthetic-duo-host.test",
+                        "AuthUrl":"synthetic-duo-auth-url"
+                    }
+                },
+                "SsoEmail2faSessionToken":"synthetic-sso-email-session-token",
+                "Email":"user@example.test",
+                "MasterPasswordPolicy":{"MinLength":12}
+            }"#,
+        )
+        .create();
+
+    let error = ApiClient::new(endpoint)
+        .exchange_password_token(&PasswordTokenRequest::new(
+            "user@example.test",
+            "synthetic-master-hash",
+            "synthetic-client-id",
+            Device::new(25, "Linux CLI", "synthetic-device-id"),
+        ))
+        .expect_err("400 two-factor challenge should return a typed client error");
+
+    let ApiClientError::TwoFactorRequired {
+        status, challenge, ..
+    } = &error
+    else {
+        panic!("expected two-factor challenge error, got {error:?}");
+    };
+
+    assert_eq!(*status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        challenge
+            .provider_data(TwoFactorProvider::Email)
+            .and_then(|data| data.get("Email")),
+        Some(&serde_json::json!("u***@example.test"))
+    );
+    assert_eq!(
+        challenge
+            .provider_data(TwoFactorProvider::Duo)
+            .and_then(|data| data.get("Host")),
+        Some(&serde_json::json!("synthetic-duo-host.test"))
+    );
+    assert_eq!(
+        challenge
+            .sso_email_2fa_session_token()
+            .map(SecretString::as_str),
+        Some("synthetic-sso-email-session-token")
+    );
+
+    let rendered = format!("{error:?}\n{error}");
+    for secret in [
+        "synthetic-master-hash",
+        "synthetic-duo-auth-url",
+        "synthetic-sso-email-session-token",
+        "synthetic-device-id",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "two-factor challenge error leaked secret {secret:?}: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("two-factor challenge"),
+        "error should retain challenge context without secret material: {rendered}"
+    );
 }
 
 #[test]
