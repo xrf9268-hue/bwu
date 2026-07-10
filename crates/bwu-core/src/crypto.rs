@@ -30,7 +30,7 @@ use openssl::{
     rsa::Padding,
 };
 use pbkdf2::pbkdf2_hmac;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::redaction::SecretString;
@@ -631,6 +631,7 @@ pub fn derive_master_key(
             memory_mib,
             parallelism,
         } => {
+            let argon2_salt = Sha256::digest(normalized_salt.as_bytes());
             let memory_kib = memory_mib
                 .checked_mul(1024)
                 .ok_or(CryptoError::InvalidKdfParameters)?;
@@ -639,7 +640,7 @@ pub fn derive_master_key(
             Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
                 .hash_password_into(
                     password.expose_secret().as_bytes(),
-                    normalized_salt.as_bytes(),
+                    &argon2_salt,
                     &mut *output,
                 )
                 .map_err(|_| CryptoError::InvalidKdfParameters)?;

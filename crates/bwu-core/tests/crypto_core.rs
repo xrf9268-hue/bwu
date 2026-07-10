@@ -1,3 +1,4 @@
+use argon2::{Algorithm as Argon2Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bwu_core::{
     crypto::{EncryptedString, KdfConfig, RsaEncryptedString, SymmetricKey, derive_master_key},
@@ -10,6 +11,8 @@ use chacha20poly1305::{
 use coset::{
     Algorithm, CborSerializable, CoseEncrypt0Builder, CoseKeyBuilder, HeaderBuilder, iana,
 };
+use sha2::{Digest as _, Sha256};
+use zeroize::Zeroizing;
 
 fn assert_secret_hex(secret: &bwu_core::crypto::SymmetricKey, expected_hex: &str) {
     let actual_hex = secret
@@ -21,6 +24,20 @@ fn assert_secret_hex(secret: &bwu_core::crypto::SymmetricKey, expected_hex: &str
         actual_hex == expected_hex,
         "derived key did not match the fixed synthetic vector"
     );
+}
+
+fn expected_argon2id_master_key(password: &SecretString, normalized_salt: &str) -> SymmetricKey {
+    let salt_sha = Sha256::digest(normalized_salt.as_bytes());
+    let params = Params::new(16 * 1024, 2, 1, Some(32)).expect("synthetic Argon2id params fit");
+    let mut expected = Zeroizing::new([0_u8; 32]);
+    Argon2::new(Argon2Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(
+            password.expose_secret().as_bytes(),
+            &salt_sha,
+            &mut *expected,
+        )
+        .expect("synthetic Argon2id vector should derive");
+    SymmetricKey::new(expected.to_vec()).expect("expected vector length is valid")
 }
 
 fn pad_cose_key(mut encoded_key: Vec<u8>) -> Vec<u8> {
@@ -127,9 +144,10 @@ fn crypto_core_kdf_vectors_cover_pbkdf2_and_argon2id() {
         KdfConfig::argon2id(2, 16, 1),
     )
     .expect("Argon2id vector should derive");
-    assert_secret_hex(
-        &argon2id,
-        "38cdf665340138c1f8554ea03cf23789a0233e810944d5d69571497248a1b3ba",
+    assert_eq!(
+        argon2id,
+        expected_argon2id_master_key(&password, "synthetic-salt-16"),
+        "Argon2id vector should hash the normalized salt before derivation"
     );
 }
 
@@ -166,6 +184,24 @@ fn crypto_core_argon2id_normalizes_account_email_salt() {
     assert_eq!(
         noisy, normalized,
         "Argon2id account-email salts should be normalized consistently with PBKDF2"
+    );
+}
+
+#[test]
+fn crypto_core_argon2id_uses_sha256_of_normalized_account_email_salt() {
+    let password = SecretString::new("synthetic-master-password");
+    let expected = expected_argon2id_master_key(&password, "user@example.com");
+
+    let derived = derive_master_key(
+        &password,
+        " USER@example.com ",
+        KdfConfig::argon2id(2, 16, 1),
+    )
+    .expect("Argon2id master key should derive");
+
+    assert_eq!(
+        derived, expected,
+        "Argon2id should use SHA-256 of the normalized account email as the salt"
     );
 }
 
